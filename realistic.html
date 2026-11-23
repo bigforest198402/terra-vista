@@ -74,8 +74,8 @@
   #t-down  { right:112px; bottom:112px; width:50px; height:50px; font-size:12px; }
   #t-fly   { right:36px;  bottom:192px; width:50px; height:50px; font-size:12px; }
   #t-menu  { left:12px; top:12px; width:42px; height:42px; border-radius:12px; font-size:15px; }
-  body.touch #hotbar { top:10px; bottom:auto; padding:5px 6px; gap:4px; }
-  body.touch .slot, body.touch .slot canvas { width:30px; height:30px; }
+  body.touch #hotbar { top:10px; bottom:auto; padding:5px 6px; gap:4px; z-index:7; }   /* 操作面より手前に出してタップできるようにする */
+  body.touch .slot, body.touch .slot canvas { width:34px; height:34px; }
   body.touch .slot.sel { transform:translateY(3px) scale(1.1); }
   body.touch #itemname { top:58px; bottom:auto; }
   body.touch #menu h1 { font-size:34px; }
@@ -569,6 +569,97 @@ function caveAt(x, y, z) {
 }
 function treeAt(x, z) { return hash2(x, z, 50) < 0.011; }
 
+/* ---------- はじめから建っている家（スポーン地点のまわりに数軒。普通のブロックなので壊したり改築できる） ----------
+   局所座標 (u,v): u=間口方向, v=奥行き方向, v=0 が玄関側の壁（外は v<0）。rot で 90 度ずつ回す */
+const HOUSE_TYPES = [
+  { W: 9, D: 7, wall: B.PLANKS, corner: B.COBBLE, roof: B.BRICK },   // 板張りに石の柱、れんが屋根
+  { W: 7, D: 6, wall: B.BRICK,  corner: B.COBBLE, roof: B.PLANKS },  // れんが造り、板屋根
+  { W: 7, D: 7, wall: B.COBBLE, corner: B.PLANKS, roof: B.BRICK },   // 石造りの小屋
+];
+let _houses = null;
+function getHouses() { if (!_houses) _houses = planHouses(); return _houses; }
+function planHouses() {
+  const SX = 8, SZ = 8, out = [];
+  const toW = (r, x0, z0, u, v) => r === 0 ? [x0 + u, z0 + v] : r === 1 ? [x0 - v, z0 + u] : r === 2 ? [x0 - u, z0 - v] : [x0 + v, z0 - u];
+  const FACE = [[0, -1], [1, 0], [0, 1], [-1, 0]];               // 玄関の向き
+  let ti = 0;
+  for (let ring = 0; ring < 9 && ti < HOUSE_TYPES.length; ring++) {
+    const rad = 14 + ring * 5, nA = 10 + ring * 3, a0 = hash2(ring, 3, 401) * 6.2832;
+    for (let ai = 0; ai < nA && ti < HOUSE_TYPES.length; ai++) {
+      const T = HOUSE_TYPES[ti], a = a0 + ai / nA * 6.2832;
+      const x0 = Math.round(SX + Math.cos(a) * rad), z0 = Math.round(SZ + Math.sin(a) * rad);
+      /* 玄関をスポーン地点に向ける */
+      let best = 0, bd = -2;
+      for (let r = 0; r < 4; r++) {
+        const c = toW(r, x0, z0, T.W / 2, T.D / 2), dx = SX - c[0], dz = SZ - c[1], l = Math.hypot(dx, dz) || 1;
+        const d = (FACE[r][0] * dx + FACE[r][1] * dz) / l;
+        if (d > bd) { bd = d; best = r; }
+      }
+      const r = best;
+      /* 敷地: ひさし・階段まで含めて平らで、水辺でも山頂でもないこと */
+      let hmin = 99, hmax = -99, x1 = 1e9, x2 = -1e9, z1 = 1e9, z2 = -1e9;
+      for (let u = -1; u <= T.W; u++) for (let v = -4; v <= T.D; v++) {
+        const p = toW(r, x0, z0, u, v), h = heightAt(p[0], p[1]);
+        if (v >= -1) { hmin = Math.min(hmin, h); hmax = Math.max(hmax, h); }
+        x1 = Math.min(x1, p[0]); x2 = Math.max(x2, p[0]); z1 = Math.min(z1, p[1]); z2 = Math.max(z2, p[1]);
+      }
+      if (hmax - hmin > 2 || hmin <= SEA + 1 || hmax >= 44) continue;
+      if (SX >= x1 - 3 && SX <= x2 + 3 && SZ >= z1 - 3 && SZ <= z2 + 3) continue;
+      if (out.some((o) => x1 < o.x2 + 5 && x2 > o.x1 - 5 && z1 < o.z2 + 5 && z2 > o.z1 - 5)) continue;
+      out.push(buildHouse(T, r, x0, z0, hmax + 1, toW, x1, x2, z1, z2));
+      ti++;
+    }
+  }
+  return out;
+}
+function buildHouse(T, r, x0, z0, F, toW, x1, x2, z1, z2) {
+  const list = [];
+  const put = (u, v, y, id) => { const p = toW(r, x0, z0, u, v); list.push(p[0], y, p[1], id); };
+  const W = T.W, D = T.D, mid = Math.floor(W / 2), roofTop = F + 4 + Math.ceil(D / 2);
+  /* 1) 敷地の上を空ける */
+  for (let u = -1; u <= W; u++) for (let v = -1; v <= D; v++) for (let y = F + 1; y <= roofTop + 3; y++) put(u, v, y, B.AIR);
+  /* 2) 石の基礎（地面の少し下から床まで）と板の床 */
+  for (let u = 0; u < W; u++) for (let v = 0; v < D; v++) {
+    const p = toW(r, x0, z0, u, v), h = heightAt(p[0], p[1]);
+    for (let y = h - 1; y <= F; y++) put(u, v, y, B.COBBLE);
+    if (u > 0 && u < W - 1 && v > 0 && v < D - 1) put(u, v, F, B.PLANKS);
+  }
+  /* 3) 玄関前の石段 */
+  for (let s = 1; s <= 3; s++) for (let du = -1; du <= 1; du++) {
+    const p = toW(r, x0, z0, mid + du, -s), h = heightAt(p[0], p[1]), top = F - s;   // 1 段ずつ下がる
+    if (top < h) continue;
+    for (let y = h - 1; y <= top; y++) put(mid + du, -s, y, B.COBBLE);
+  }
+  /* 4) 壁（角は柱）・窓・入口 */
+  for (let u = 0; u < W; u++) for (let v = 0; v < D; v++) {
+    const edgeU = u === 0 || u === W - 1, edgeV = v === 0 || v === D - 1;
+    if (!edgeU && !edgeV) continue;
+    for (let y = F + 1; y <= F + 3; y++) {
+      let id = (edgeU && edgeV) ? T.corner : T.wall;
+      const win = y === F + 2 && !(edgeU && edgeV) &&
+        ((edgeV && (u === 2 || u === W - 3 || (v === D - 1 && u === mid))) || (edgeU && v === Math.floor(D / 2)));
+      if (win) id = B.GLASS;
+      if (v === 0 && u === mid && y <= F + 2) id = B.AIR;          // 入口
+      put(u, v, y, id);
+    }
+    put(u, v, F + 4, T.corner === B.COBBLE ? B.PLANKS : T.wall);   // 壁の上の梁
+  }
+  /* 5) 切妻屋根（ひさし付き）と妻壁 */
+  for (let k = 0; ; k++) {
+    const va = -1 + k, vb = D - k, y = F + 4 + k;
+    if (va > vb) break;
+    for (let u = -1; u <= W; u++) { put(u, va, y, T.roof); if (vb !== va) put(u, vb, y, T.roof); }
+    if (k > 0) for (let v = va + 1; v < vb; v++) { put(0, v, y, T.wall === B.BRICK ? B.BRICK : B.PLANKS); put(W - 1, v, y, T.wall === B.BRICK ? B.BRICK : B.PLANKS); }
+  }
+  /* 6) 煙突 */
+  for (let y = F + 4; y <= roofTop + 1; y++) put(W - 3, D - 2, y, B.COBBLE);
+  return { x1: x1 - 1, x2: x2 + 1, z1: z1 - 1, z2: z2 + 1, blocks: new Int32Array(list) };
+}
+function nearHouse(x, z, m) {
+  for (const o of getHouses()) if (x >= o.x1 - m && x <= o.x2 + m && z >= o.z1 - m && z <= o.z2 + m) return true;
+  return false;
+}
+
 function genChunk(cx, cz) {
   const data = new Uint8Array(CS * H * CS);
   const bx0 = cx * CS, bz0 = cz * CS;
@@ -598,7 +689,7 @@ function genChunk(cx, cz) {
   /* 木（チャンク境界をまたぐ分は余白2マスも走査） */
   for (let tx = -2; tx < CS + 2; tx++) for (let tz = -2; tz < CS + 2; tz++) {
     const wx = bx0 + tx, wz = bz0 + tz;
-    if (!treeAt(wx, wz)) continue;
+    if (!treeAt(wx, wz) || nearHouse(wx, wz, 3)) continue;
     const h = Math.min(H - 2, Math.max(2, heightAt(wx, wz)));
     if (h <= SEA + 1 || h >= 44 || h + 8 >= H) continue;
     const th = 4 + Math.floor(hash2(wx, wz, 51) * 3); // 幹の高さ 4〜6
@@ -617,6 +708,16 @@ function genChunk(cx, cz) {
       }
     }
     for (let dy = 1; dy <= th; dy++) put(wx, h + dy, wz, B.LOG, false);
+  }
+
+  /* 家 */
+  for (const o of getHouses()) {
+    if (o.x2 < bx0 || o.x1 >= bx0 + CS || o.z2 < bz0 || o.z1 >= bz0 + CS) continue;
+    const L = o.blocks;
+    for (let i = 0; i < L.length; i += 4) {
+      const lx = L[i] - bx0, lz = L[i + 2] - bz0, y = L[i + 1];
+      if (lx >= 0 && lx < CS && lz >= 0 && lz < CS && y >= 0 && y < H) set(lx, y, lz, L[i + 3]);
+    }
   }
 
   /* プレイヤーの編集を反映 */
