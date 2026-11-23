@@ -54,6 +54,35 @@
     border-bottom:1px solid rgba(255,255,255,.3); cursor:pointer; }
   #menu .btns span:hover { color:#fff; }
   #err { color:#ff9a9a; font-size:13px; }
+
+  /* ---- スマホ・タブレット用のタッチ操作 ---- */
+  body.touch { touch-action:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  #touch { display:none; position:fixed; inset:0; z-index:6; pointer-events:none; }
+  body.touch.playing #touch { display:block; }
+  #t-area { position:absolute; inset:0; pointer-events:auto; }
+  #joy { position:absolute; width:120px; height:120px; margin:-60px 0 0 -60px; border-radius:50%; display:none;
+    border:1.5px solid rgba(255,255,255,.45); background:rgba(255,255,255,.08); pointer-events:none; }
+  #joy i { position:absolute; left:50%; top:50%; width:50px; height:50px; margin:-25px 0 0 -25px; border-radius:50%;
+    background:rgba(255,255,255,.55); box-shadow:0 2px 10px rgba(0,0,0,.35); }
+  .tb { position:absolute; display:flex; align-items:center; justify-content:center; border-radius:50%;
+    pointer-events:auto; color:#fff; font-size:13px; letter-spacing:.08em; text-shadow:0 1px 4px rgba(0,0,0,.7);
+    background:rgba(10,14,18,.38); border:1.5px solid rgba(255,255,255,.42); }
+  .tb.on { background:rgba(255,255,255,.55); color:#10161c; text-shadow:none; }
+  #t-jump  { right:20px;  bottom:24px;  width:76px; height:76px; }
+  #t-break { right:108px; bottom:30px;  width:64px; height:64px; }
+  #t-place { right:30px;  bottom:114px; width:64px; height:64px; }
+  #t-down  { right:112px; bottom:112px; width:50px; height:50px; font-size:12px; }
+  #t-fly   { right:36px;  bottom:192px; width:50px; height:50px; font-size:12px; }
+  #t-menu  { left:12px; top:12px; width:42px; height:42px; border-radius:12px; font-size:15px; }
+  body.touch #hotbar { top:10px; bottom:auto; padding:5px 6px; gap:4px; }
+  body.touch .slot, body.touch .slot canvas { width:30px; height:30px; }
+  body.touch .slot.sel { transform:translateY(3px) scale(1.1); }
+  body.touch #itemname { top:58px; bottom:auto; }
+  body.touch #menu h1 { font-size:34px; }
+  @media (max-width:520px) {   /* 縦向きはメニューボタンと重ならないよう素材パレットを下げる */
+    body.touch #hotbar { top:62px; }
+    body.touch #itemname { top:108px; }
+  }
 </style>
 </head>
 <body>
@@ -63,6 +92,16 @@
 <div id="itemname"></div>
 <div id="hotbar"></div>
 <div id="debug"></div>
+<div id="touch">
+  <div id="t-area"></div>
+  <div id="joy"><i></i></div>
+  <div class="tb" id="t-jump">ジャンプ</div>
+  <div class="tb" id="t-break">掘る</div>
+  <div class="tb" id="t-place">置く</div>
+  <div class="tb" id="t-down">下降</div>
+  <div class="tb" id="t-fly">飛行</div>
+  <div class="tb" id="t-menu">❚❚</div>
+</div>
 
 <div id="menu">
   <h1>TERRA <span>VISTA</span></h1>
@@ -79,6 +118,11 @@
     <span id="btn-reset">地形の編集をリセット</span>
   </div>
   <div id="err"></div>
+  <div class="hint" id="touch-hint" style="display:none">
+    <b>左側をなぞる</b>移動　<b>右側をなぞる</b>視点<br>
+    <b>掘る / 置く</b>画面中央の点の先に作用（長押しで連続）<br>
+    <b>上の素材</b>タップで切替　<b>❚❚</b>メニュー　（横向き推奨・自動保存）
+  </div>
 </div>
 
 <script src="three.min.js"></script>
@@ -1380,7 +1424,7 @@ camera.rotation.order = 'YXZ';
 
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
 renderer.setSize(innerWidth, innerHeight);
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, matchMedia('(pointer: coarse)').matches ? 1.5 : 2));   // スマホは高精細すぎると重いので抑える
 renderer.domElement.id = 'game';
 document.body.appendChild(renderer.domElement);
 
@@ -2003,21 +2047,21 @@ function updatePlayer(dt) {
   const inWaterHead = getBlock(Math.floor(player.pos.x), Math.floor(player.pos.y + EYE), Math.floor(player.pos.z)) === B.WATER;
 
   /* 移動入力（視線方向基準） */
-  let mx = 0, mz = 0;
+  let mx = TOUCH.mx, mz = TOUCH.mz;     // タッチのスティックはアナログ量（0〜1）
   if (keys['KeyW']) mz -= 1;
   if (keys['KeyS']) mz += 1;
   if (keys['KeyA']) mx -= 1;
   if (keys['KeyD']) mx += 1;
   const moving = mx !== 0 || mz !== 0;
   player.sneaking = !player.flying && !!keys['ShiftLeft'];
-  player.sprinting = !!keys['ControlLeft'] && keys['KeyW'] && !player.sneaking;
+  player.sprinting = ((!!keys['ControlLeft'] && keys['KeyW']) || TOUCH.run) && !player.sneaking;
 
   let speed = player.flying ? FLY_SPEED : (player.sprinting ? SPRINT_SPEED : (player.sneaking ? SNEAK_SPEED : WALK_SPEED));
   if (inWaterFeet && !player.flying) speed *= 0.55;
 
   let dx = 0, dz = 0;
   if (moving) {
-    const len = Math.hypot(mx, mz);
+    const len = Math.max(1, Math.hypot(mx, mz));   // スティックを浅く倒したときはゆっくり歩く
     mx /= len; mz /= len;
     const s = Math.sin(player.yaw), c = Math.cos(player.yaw);
     /* 視線方向と移動方向のずれを修正（前=(-sin,-cos), 右=(cos,-sin)） */
@@ -2284,6 +2328,7 @@ let showDebug = false, fpsEma = 60, debugTick = 0;
  * ===================================================================== */
 const menuEl = document.getElementById('menu');
 let locked = false;
+const TOUCH = { on: false, mx: 0, mz: 0, run: false };
 
 function requestLock() {
   initAudio();
@@ -2292,7 +2337,7 @@ function requestLock() {
 }
 menuEl.addEventListener('click', (e) => {
   if (e.target.id === 'btn-new' || e.target.id === 'btn-reset') return;
-  requestLock();
+  if (TOUCH.on) startTouchPlay(); else requestLock();
 });
 document.getElementById('btn-new').addEventListener('click', (e) => {
   e.stopPropagation();
@@ -2350,6 +2395,98 @@ document.addEventListener('keydown', (e) => {
 });
 document.addEventListener('keyup', (e) => { keys[e.code] = false; });
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+/* ---- タッチ操作（スマホ・タブレット）: 左半分=移動スティック / 右半分=視点 / 右下のボタン ----
+   ?touch=1 で PC でも試せる */
+function onSpaceDown() {
+  const now = performance.now();
+  if (now - lastSpace < 280) { player.flying = !player.flying; player.vel.y = 0; lastSpace = 0; }
+  else lastSpace = now;
+}
+(function setupTouch() {
+  const q = new URLSearchParams(location.search).get('touch');
+  TOUCH.on = q === '1' || (q !== '0' && matchMedia('(hover: none) and (pointer: coarse)').matches);
+  slotEls.forEach((s, i) => s.addEventListener('pointerdown', (e) => { e.stopPropagation(); selectSlot(i); }));
+  if (!TOUCH.on) return;
+  document.body.classList.add('touch');
+  document.getElementById('play').textContent = 'タップして開始';
+  document.querySelector('#menu .hint').style.display = 'none';
+  document.getElementById('touch-hint').style.display = '';
+
+  const area = document.getElementById('t-area'), joy = document.getElementById('joy'), knob = joy.firstElementChild;
+  const R = 52;
+  let joyId = null, jx = 0, jy = 0, lookId = null, lx = 0, ly = 0;
+  const opt = { passive: false };
+  area.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      if (t.clientX < innerWidth * 0.42 && joyId === null) {
+        joyId = t.identifier; jx = t.clientX; jy = t.clientY;
+        joy.style.left = jx + 'px'; joy.style.top = jy + 'px'; joy.style.display = 'block';
+        knob.style.transform = '';
+      } else if (lookId === null) { lookId = t.identifier; lx = t.clientX; ly = t.clientY; }
+    }
+  }, opt);
+  area.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      if (t.identifier === joyId) {
+        let dx = t.clientX - jx, dy = t.clientY - jy;
+        const d = Math.hypot(dx, dy);
+        if (d > R) { dx *= R / d; dy *= R / d; }
+        knob.style.transform = `translate(${dx}px,${dy}px)`;
+        const k = Math.min(1, d / R), dz = k < 0.15 ? 0 : (k - 0.15) / 0.85;    // 中心付近は遊び
+        TOUCH.mx = d > 0 ? dx / Math.min(d, R) * dz : 0; TOUCH.mz = d > 0 ? dy / Math.min(d, R) * dz : 0;
+        TOUCH.run = dz > 0.97 && dy < -R * 0.8;                                    // 前いっぱいに倒すとダッシュ
+      } else if (t.identifier === lookId) {
+        player.yaw -= (t.clientX - lx) * 0.0055;
+        player.pitch -= (t.clientY - ly) * 0.0055;
+        const lim = Math.PI / 2 - 0.001;
+        player.pitch = Math.max(-lim, Math.min(lim, player.pitch));
+        lx = t.clientX; ly = t.clientY;
+      }
+    }
+  }, opt);
+  const end = (e) => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === joyId) { joyId = null; joy.style.display = 'none'; TOUCH.mx = TOUCH.mz = 0; TOUCH.run = false; }
+      if (t.identifier === lookId) lookId = null;
+    }
+  };
+  area.addEventListener('touchend', end); area.addEventListener('touchcancel', end);
+
+  /* ボタン: 押している間だけ有効 */
+  const hold = (id, down, up) => {
+    const el = document.getElementById(id);
+    el.addEventListener('touchstart', (e) => { e.preventDefault(); e.stopPropagation(); el.classList.add('on'); down(); }, opt);
+    const u = (e) => { e.preventDefault(); el.classList.remove('on'); if (up) up(); };
+    el.addEventListener('touchend', u, opt); el.addEventListener('touchcancel', u, opt);
+  };
+  hold('t-jump',  () => { keys['Space'] = true; onSpaceDown(); }, () => { keys['Space'] = false; });
+  hold('t-down',  () => { keys['ShiftLeft'] = true; }, () => { keys['ShiftLeft'] = false; });
+  hold('t-break', () => { mouseHeld[0] = true; mouseRepeat = 0.3; tryBreak(); }, () => { mouseHeld[0] = false; });
+  hold('t-place', () => { mouseHeld[2] = true; mouseRepeat = 0.3; tryPlace(); }, () => { mouseHeld[2] = false; });
+  hold('t-fly',   () => { player.flying = !player.flying; player.vel.y = 0; });
+  hold('t-menu',  () => { stopTouchPlay(); });
+})();
+function startTouchPlay() {
+  initAudio();
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  const de = document.documentElement;
+  try { if (de.requestFullscreen && !document.fullscreenElement) de.requestFullscreen().catch(() => {}); } catch (e) {}
+  locked = true;
+  menuEl.style.display = 'none';
+  document.body.classList.add('playing');
+}
+function stopTouchPlay() {
+  locked = false;
+  for (const k in keys) keys[k] = false;
+  mouseHeld[0] = mouseHeld[2] = false;
+  TOUCH.mx = TOUCH.mz = 0; TOUCH.run = false;
+  document.getElementById('joy').style.display = 'none';
+  document.body.classList.remove('playing');
+  menuEl.style.display = 'flex';
+}
 
 /* =====================================================================
  *  チャンクストリーミング（リアル版: 草むらは近くだけ、1フレームの作業時間に上限）
