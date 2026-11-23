@@ -1,0 +1,1478 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxelVista — Cinematic Edition</title>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#000; height:100%;
+    font-family:"Segoe UI", "Hiragino Sans", "Meiryo", sans-serif; user-select:none; }
+  canvas#game { display:block; }
+
+  /* ---- crosshair ---- */
+  #crosshair { position:fixed; left:50%; top:50%; width:20px; height:20px;
+    transform:translate(-50%,-50%); pointer-events:none; mix-blend-mode:difference; z-index:5; }
+  #crosshair::before, #crosshair::after { content:""; position:absolute; background:#ddd; }
+  #crosshair::before { left:9px; top:0; width:2px; height:20px; }
+  #crosshair::after  { left:0; top:9px; width:20px; height:2px; }
+
+  /* ---- hotbar ---- */
+  #hotbar { position:fixed; left:50%; bottom:10px; transform:translateX(-50%);
+    display:flex; gap:2px; padding:3px; background:rgba(0,0,0,.35);
+    border:2px solid rgba(0,0,0,.55); border-radius:4px; z-index:5; }
+  .slot { width:46px; height:46px; background:rgba(120,120,120,.35);
+    border:2px solid #2a2a2a; box-shadow:inset 0 0 0 2px rgba(255,255,255,.12);
+    display:flex; align-items:center; justify-content:center; }
+  .slot.sel { border-color:#fff; box-shadow:inset 0 0 0 2px rgba(255,255,255,.35); }
+  .slot canvas { image-rendering:pixelated; }
+
+  #itemname { position:fixed; left:50%; bottom:72px; transform:translateX(-50%);
+    color:#fff; text-shadow:2px 2px 0 rgba(0,0,0,.7); font-size:18px; font-weight:600;
+    opacity:0; transition:opacity .5s; pointer-events:none; z-index:5; }
+
+  /* ---- debug (F3) ---- */
+  #debug { position:fixed; left:8px; top:8px; color:#fff; font:13px/1.5 Consolas, monospace;
+    text-shadow:1px 1px 0 #000; white-space:pre; display:none; z-index:5; pointer-events:none; }
+
+  /* ---- underwater tint ---- */
+  #water-overlay { position:fixed; inset:0; background:rgba(15,60,160,.34);
+    display:none; pointer-events:none; z-index:4; }
+
+  /* ---- title / pause menu ---- */
+  #menu { position:fixed; inset:0; z-index:10; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px;
+    background:rgba(10,10,14,.55); backdrop-filter:blur(2px); cursor:pointer; }
+  #menu h1 { color:#fff; font-size:52px; margin:0; letter-spacing:2px;
+    text-shadow:4px 4px 0 rgba(0,0,0,.6); }
+  #menu h1 span { color:#9ee65a; }
+  #menu .sub { color:#ccc; font-size:15px; margin-top:-8px; text-shadow:1px 1px 0 #000; }
+  #play { margin-top:8px; padding:12px 46px; font-size:20px; color:#fff; background:#6b6b6b;
+    border:2px solid #000; box-shadow:inset 0 -4px 0 rgba(0,0,0,.35), inset 0 2px 0 rgba(255,255,255,.3);
+    cursor:pointer; }
+  #play:hover { background:#7d8f5a; }
+  #menu .hint { color:#e8e8e8; font-size:13.5px; line-height:1.9; text-align:center;
+    text-shadow:1px 1px 0 #000; }
+  #menu .hint b { color:#ffe27a; font-weight:600; }
+  #menu .btns { margin-top:6px; display:flex; gap:18px; }
+  #menu .btns span { color:#9db8ff; font-size:13px; text-decoration:underline; cursor:pointer; }
+  #menu .btns span:hover { color:#cfe0ff; }
+  #err { color:#ff8080; font-size:14px; }
+</style>
+</head>
+<body>
+
+<div id="crosshair"></div>
+<div id="water-overlay"></div>
+<div id="itemname"></div>
+<div id="hotbar"></div>
+<div id="debug"></div>
+
+<div id="menu">
+  <h1>Voxel<span>Vista</span></h1>
+  <div class="sub">ボクセルワールド — Cinematic Edition (クリエイティブモード)</div>
+  <div id="play">クリックしてプレイ</div>
+  <div class="hint">
+    <b>WASD</b> 移動　<b>マウス</b> 視点　<b>Space</b> ジャンプ (2回押しで飛行モード切替)<br>
+    <b>左クリック</b> ブロック破壊　<b>右クリック</b> 設置　<b>ホイールクリック</b> ブロック選択<br>
+    <b>1〜9 / ホイール</b> ホットバー切替　<b>Ctrl</b> ダッシュ　<b>Shift</b> スニーク / 飛行下降<br>
+    <b>F3</b> デバッグ情報　<b>Esc</b> メニュー　（ワールドは自動セーブされます）
+  </div>
+  <div class="btns">
+    <span id="btn-new">新しいワールドを生成</span>
+    <span id="btn-reset">建築をリセット</span>
+  </div>
+  <div id="err"></div>
+</div>
+
+<script src="three.min.js"></script>
+<script>
+if (typeof THREE === 'undefined') {
+  document.write('<scr' + 'ipt src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></scr' + 'ipt>');
+}
+</script>
+<script>
+'use strict';
+if (typeof THREE === 'undefined') {
+  document.getElementById('err').textContent = 'three.min.js を読み込めませんでした。ネット接続を確認してください。';
+  throw new Error('THREE not loaded');
+}
+
+/* =====================================================================
+ *  基本定数
+ * ===================================================================== */
+const CS = 16;                 // チャンクの幅 (X/Z)
+const H  = 64;                 // ワールドの高さ
+const SEA = 28;                // 海面の高さ
+const RENDER_DIST = 7;         // 描画距離（チャンク）※シネマ版は遠景を広げる
+const REACH = 5;               // ブロックへの届く距離
+const DAY_LENGTH = 600;        // 一日の長さ（秒）
+const GRAVITY = 32;            // 重力 (m/s^2)
+const JUMP_V = 9.0;            // ジャンプ初速
+const WALK_SPEED = 4.317;      // 歩行速度 (Minecraft準拠)
+const SPRINT_SPEED = 5.612;    // ダッシュ速度
+const SNEAK_SPEED = 1.31;      // スニーク速度
+const FLY_SPEED = 10.9;        // 飛行速度
+const EYE = 1.62;              // 目の高さ
+const PW = 0.3;                // プレイヤー半幅
+const PH = 1.8;                // プレイヤーの高さ
+
+/* シードとセーブデータ */
+let seed = parseInt(localStorage.getItem('mcworld_seed') || '', 10);
+if (!Number.isFinite(seed)) { seed = 1337; localStorage.setItem('mcworld_seed', String(seed)); }
+const SAVE_KEY = 'mcworld_edits_' + seed;
+
+/* =====================================================================
+ *  ブロック定義
+ *  tiles: [+X, -X, +Y, -Y, +Z, -Z] のテクスチャ番号
+ * ===================================================================== */
+const T = { GRASS_TOP:0, GRASS_SIDE:1, DIRT:2, STONE:3, COBBLE:4, PLANKS:5,
+            LOG_SIDE:6, LOG_TOP:7, LEAVES:8, SAND:9, GLASS:10, WATER:11,
+            BEDROCK:12, BRICK:13, SNOW:14, COAL:15 };
+
+const B = { AIR:0, GRASS:1, DIRT:2, STONE:3, COBBLE:4, PLANKS:5, LOG:6, LEAVES:7,
+            SAND:8, GLASS:9, WATER:10, BEDROCK:11, BRICK:12, SNOW:13, COAL_ORE:14 };
+
+const BLOCKS = {
+  [B.GRASS]:    { name:'草ブロック',   tiles:[T.GRASS_SIDE,T.GRASS_SIDE,T.GRASS_TOP,T.DIRT,T.GRASS_SIDE,T.GRASS_SIDE] },
+  [B.DIRT]:     { name:'土',           tiles:[T.DIRT,T.DIRT,T.DIRT,T.DIRT,T.DIRT,T.DIRT] },
+  [B.STONE]:    { name:'石',           tiles:[T.STONE,T.STONE,T.STONE,T.STONE,T.STONE,T.STONE] },
+  [B.COBBLE]:   { name:'丸石',         tiles:[T.COBBLE,T.COBBLE,T.COBBLE,T.COBBLE,T.COBBLE,T.COBBLE] },
+  [B.PLANKS]:   { name:'オークの木材', tiles:[T.PLANKS,T.PLANKS,T.PLANKS,T.PLANKS,T.PLANKS,T.PLANKS] },
+  [B.LOG]:      { name:'オークの原木', tiles:[T.LOG_SIDE,T.LOG_SIDE,T.LOG_TOP,T.LOG_TOP,T.LOG_SIDE,T.LOG_SIDE] },
+  [B.LEAVES]:   { name:'オークの葉',   tiles:[T.LEAVES,T.LEAVES,T.LEAVES,T.LEAVES,T.LEAVES,T.LEAVES], seeThrough:true },
+  [B.SAND]:     { name:'砂',           tiles:[T.SAND,T.SAND,T.SAND,T.SAND,T.SAND,T.SAND] },
+  [B.GLASS]:    { name:'ガラス',       tiles:[T.GLASS,T.GLASS,T.GLASS,T.GLASS,T.GLASS,T.GLASS], seeThrough:true },
+  [B.WATER]:    { name:'水',           tiles:[T.WATER,T.WATER,T.WATER,T.WATER,T.WATER,T.WATER], seeThrough:true, liquid:true },
+  [B.BEDROCK]:  { name:'岩盤',         tiles:[T.BEDROCK,T.BEDROCK,T.BEDROCK,T.BEDROCK,T.BEDROCK,T.BEDROCK], unbreakable:true },
+  [B.BRICK]:    { name:'レンガ',       tiles:[T.BRICK,T.BRICK,T.BRICK,T.BRICK,T.BRICK,T.BRICK] },
+  [B.SNOW]:     { name:'雪',           tiles:[T.SNOW,T.SNOW,T.SNOW,T.SNOW,T.SNOW,T.SNOW] },
+  [B.COAL_ORE]: { name:'石炭鉱石',     tiles:[T.COAL,T.COAL,T.COAL,T.COAL,T.COAL,T.COAL] },
+};
+
+const HOTBAR_ITEMS = [B.GRASS, B.DIRT, B.STONE, B.COBBLE, B.PLANKS, B.LOG, B.LEAVES, B.SAND, B.GLASS];
+
+function isSolid(id)      { return id !== B.AIR && !(BLOCKS[id] && BLOCKS[id].liquid); }
+function isOccluder(id)   { return id !== B.AIR && !(BLOCKS[id] && BLOCKS[id].seeThrough); }
+
+/* =====================================================================
+ *  乱数・ノイズ
+ * ===================================================================== */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hash2(x, z, salt) {
+  let n = Math.imul(x, 374761393) + Math.imul(z, 668265263) + Math.imul(salt | 0, 971) + seed | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  n ^= n >>> 16;
+  return (n >>> 0) / 4294967296;
+}
+function hash3(x, y, z, salt) {
+  let n = Math.imul(x, 374761393) + Math.imul(y, 1013904223) + Math.imul(z, 668265263) + Math.imul(salt | 0, 971) + seed | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  n ^= n >>> 16;
+  return (n >>> 0) / 4294967296;
+}
+function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function noise2(x, z, salt) {
+  const xi = Math.floor(x), zi = Math.floor(z);
+  const fx = x - xi, fz = z - zi, u = fade(fx), v = fade(fz);
+  const a = hash2(xi, zi, salt),     b2 = hash2(xi + 1, zi, salt);
+  const c = hash2(xi, zi + 1, salt), d  = hash2(xi + 1, zi + 1, salt);
+  return (lerp(lerp(a, b2, u), lerp(c, d, u), v)) * 2 - 1;
+}
+function fbm2(x, z, oct, salt) {
+  let s = 0, amp = 1, f = 1, tot = 0;
+  for (let i = 0; i < oct; i++) { s += noise2(x * f, z * f, salt + i) * amp; tot += amp; amp *= 0.5; f *= 2; }
+  return s / tot;
+}
+function noise3(x, y, z, salt) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const fx = x - xi, fy = y - yi, fz = z - zi;
+  const u = fade(fx), v = fade(fy), w = fade(fz);
+  function h(dx, dy, dz) { return hash3(xi + dx, yi + dy, zi + dz, salt); }
+  const c00 = lerp(h(0,0,0), h(1,0,0), u), c10 = lerp(h(0,1,0), h(1,1,0), u);
+  const c01 = lerp(h(0,0,1), h(1,0,1), u), c11 = lerp(h(0,1,1), h(1,1,1), u);
+  return lerp(lerp(c00, c10, v), lerp(c01, c11, v), w) * 2 - 1;
+}
+/* 周期Pでタイリングするノイズ（雲テクスチャ用） */
+function wnoise(x, z, P, salt) {
+  const xi = Math.floor(x), zi = Math.floor(z);
+  const fx = x - xi, fz = z - zi, u = fade(fx), v = fade(fz);
+  function wh(a, b) { return hash2(((a % P) + P) % P, ((b % P) + P) % P, salt); }
+  const a = wh(xi, zi),     b2 = wh(xi + 1, zi);
+  const c = wh(xi, zi + 1), d  = wh(xi + 1, zi + 1);
+  return (lerp(lerp(a, b2, u), lerp(c, d, u), v)) * 2 - 1;
+}
+
+/* =====================================================================
+ *  テクスチャアトラス（手続き生成・16x16px x 16タイル）
+ * ===================================================================== */
+const N_TILES = 16;
+const atlas = document.createElement('canvas');
+atlas.width = 16 * N_TILES; atlas.height = 16;
+const actx2d = atlas.getContext('2d');
+
+function drawTile(idx, fn) {
+  const rnd = mulberry32(1000 + idx * 7 + seed);
+  const ox = idx * 16;
+  fn(actx2d, ox, rnd);
+}
+function fillNoise(c, ox, rnd, r, g, b, vary, a) {
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const v = Math.floor((rnd() * 2 - 1) * vary);
+    c.fillStyle = `rgba(${r + v},${g + v},${b + v},${(a === undefined ? 255 : a) / 255})`;
+    c.fillRect(ox + x, y, 1, 1);
+  }
+}
+
+drawTile(T.GRASS_TOP, (c, ox, rnd) => fillNoise(c, ox, rnd, 112, 168, 66, 14));
+drawTile(T.DIRT,      (c, ox, rnd) => fillNoise(c, ox, rnd, 134, 96, 67, 12));
+drawTile(T.GRASS_SIDE, (c, ox, rnd) => {
+  fillNoise(c, ox, rnd, 134, 96, 67, 12);
+  for (let x = 0; x < 16; x++) {
+    const depth = 2 + (rnd() < 0.5 ? 1 : 0);
+    for (let y = 0; y < depth; y++) {
+      const v = Math.floor((rnd() * 2 - 1) * 14);
+      c.fillStyle = `rgb(${112 + v},${168 + v},${66 + v})`;
+      c.fillRect(ox + x, y, 1, 1);
+    }
+  }
+});
+drawTile(T.STONE, (c, ox, rnd) => fillNoise(c, ox, rnd, 127, 127, 127, 9));
+drawTile(T.COBBLE, (c, ox, rnd) => {
+  for (let cy = 0; cy < 4; cy++) for (let cx = 0; cx < 4; cx++) {
+    const base = 100 + Math.floor(rnd() * 55);
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+      const edge = (x === 0 || y === 0);
+      const v = Math.floor((rnd() * 2 - 1) * 8) - (edge ? 30 : 0);
+      c.fillStyle = `rgb(${base + v},${base + v},${base + v})`;
+      c.fillRect(ox + cx * 4 + x, cy * 4 + y, 1, 1);
+    }
+  }
+});
+drawTile(T.PLANKS, (c, ox, rnd) => {
+  for (let y = 0; y < 16; y++) {
+    const band = Math.floor(y / 4);
+    const seam = (y % 4 === 3);
+    for (let x = 0; x < 16; x++) {
+      let v = Math.floor((rnd() * 2 - 1) * 10) + (band % 2 ? -8 : 0);
+      if (seam || x === ((band * 7 + 5) % 16)) v -= 45;
+      c.fillStyle = `rgb(${162 + v},${131 + v},${79 + v})`;
+      c.fillRect(ox + x, y, 1, 1);
+    }
+  }
+});
+drawTile(T.LOG_SIDE, (c, ox, rnd) => {
+  for (let x = 0; x < 16; x++) {
+    const stripe = (x % 4 === 0) ? -30 : (x % 4 === 2 ? 10 : 0);
+    for (let y = 0; y < 16; y++) {
+      const v = Math.floor((rnd() * 2 - 1) * 8) + stripe;
+      c.fillStyle = `rgb(${104 + v},${82 + v},${50 + v})`;
+      c.fillRect(ox + x, y, 1, 1);
+    }
+  }
+});
+drawTile(T.LOG_TOP, (c, ox, rnd) => {
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const d = Math.floor(Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5)));
+    const ring = (d % 2 === 0) ? 14 : -12;
+    const v = Math.floor((rnd() * 2 - 1) * 6) + ring;
+    c.fillStyle = `rgb(${170 + v},${138 + v},${88 + v})`;
+    c.fillRect(ox + x, y, 1, 1);
+  }
+});
+drawTile(T.LEAVES, (c, ox, rnd) => {
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    if (rnd() < 0.12) continue; // 透明の穴
+    const v = Math.floor((rnd() * 2 - 1) * 16);
+    c.fillStyle = `rgb(${52 + v},${94 + v},${28 + v})`;
+    c.fillRect(ox + x, y, 1, 1);
+  }
+});
+drawTile(T.SAND,  (c, ox, rnd) => fillNoise(c, ox, rnd, 219, 207, 163, 10));
+drawTile(T.GLASS, (c, ox, rnd) => {
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    if (x === 0 || x === 15 || y === 0 || y === 15) {
+      c.fillStyle = 'rgba(200,220,235,1)'; c.fillRect(ox + x, y, 1, 1);
+    } else if ((x === y + 3 || x === y + 4) && x < 12) {
+      c.fillStyle = 'rgba(255,255,255,1)'; c.fillRect(ox + x, y, 1, 1);
+    }
+  }
+});
+drawTile(T.WATER, (c, ox, rnd) => fillNoise(c, ox, rnd, 52, 96, 200, 14));
+drawTile(T.BEDROCK, (c, ox, rnd) => {
+  for (let cy = 0; cy < 8; cy++) for (let cx = 0; cx < 8; cx++) {
+    const g = 30 + Math.floor(rnd() * 70);
+    c.fillStyle = `rgb(${g},${g},${g})`;
+    c.fillRect(ox + cx * 2, cy * 2, 2, 2);
+  }
+});
+drawTile(T.BRICK, (c, ox, rnd) => {
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const row = Math.floor(y / 4);
+    const shift = (row % 2) * 4;
+    const mortar = (y % 4 === 3) || (((x + shift) % 8) === 7);
+    let st;
+    if (mortar) { const g = 140 + Math.floor(rnd() * 16); st = `rgb(${g},${g},${g})`; }
+    else { const v = Math.floor((rnd() * 2 - 1) * 12); st = `rgb(${150 + v},${67 + v},${56 + v})`; }
+    c.fillStyle = st;
+    c.fillRect(ox + x, y, 1, 1);
+  }
+});
+drawTile(T.SNOW, (c, ox, rnd) => fillNoise(c, ox, rnd, 240, 246, 246, 6));
+drawTile(T.COAL, (c, ox, rnd) => {
+  fillNoise(c, ox, rnd, 127, 127, 127, 9);
+  for (let i = 0; i < 7; i++) {
+    const x = 1 + Math.floor(rnd() * 13), y = 1 + Math.floor(rnd() * 13);
+    c.fillStyle = 'rgb(28,28,30)';
+    c.fillRect(ox + x, y, 2, 2);
+    if (rnd() < 0.5) c.fillRect(ox + x + (rnd() < 0.5 ? -1 : 2), y + 1, 1, 1);
+  }
+});
+
+/* タイルの平均色（パーティクル用） */
+const tileAvg = [];
+{
+  const img = actx2d.getImageData(0, 0, atlas.width, 16).data;
+  for (let t = 0; t < N_TILES; t++) {
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const i = (y * atlas.width + t * 16 + x) * 4;
+      if (img[i + 3] < 128) continue;
+      r += img[i]; g += img[i + 1]; b += img[i + 2]; n++;
+    }
+    n = n || 1;
+    tileAvg.push(new THREE.Color(r / n / 255, g / n / 255, b / n / 255).convertSRGBToLinear());
+  }
+}
+
+const atlasTex = new THREE.CanvasTexture(atlas);
+atlasTex.magFilter = THREE.NearestFilter;
+atlasTex.minFilter = THREE.NearestFilter;
+atlasTex.generateMipmaps = false;
+atlasTex.encoding = THREE.sRGBEncoding;
+atlasTex.wrapS = atlasTex.wrapT = THREE.ClampToEdgeWrapping;
+
+/* =====================================================================
+ *  地形生成
+ * ===================================================================== */
+function heightAt(x, z) {
+  const n = fbm2(x * 0.006, z * 0.006, 5, 10);
+  const m = fbm2(x * 0.0015 + 40, z * 0.0015 + 40, 2, 20); // 大陸スケール
+  return Math.floor(30 + n * 14 + m * 8);
+}
+function caveAt(x, y, z) {
+  if (y < 4) return false;
+  const a = noise3(x * 0.06, y * 0.10, z * 0.06, 30);
+  const b2 = noise3(x * 0.05 + 77, y * 0.09, z * 0.05 + 77, 40);
+  return Math.abs(a) < 0.13 && Math.abs(b2) < 0.13;
+}
+function treeAt(x, z) { return hash2(x, z, 50) < 0.011; }
+
+function genChunk(cx, cz) {
+  const data = new Uint8Array(CS * H * CS);
+  const bx0 = cx * CS, bz0 = cz * CS;
+  const set = (lx, y, lz, id) => { data[(lx * H + y) * CS + lz] = id; };
+  const get = (lx, y, lz) => data[(lx * H + y) * CS + lz];
+
+  for (let lx = 0; lx < CS; lx++) for (let lz = 0; lz < CS; lz++) {
+    const wx = bx0 + lx, wz = bz0 + lz;
+    const h = Math.min(H - 2, Math.max(2, heightAt(wx, wz)));
+    const sandy = h <= SEA + 1;
+    const snowy = h >= 45;
+    for (let y = 0; y < H; y++) {
+      let id = B.AIR;
+      if (y === 0) id = B.BEDROCK;
+      else if (y <= h - 4) {
+        id = B.STONE;
+        if (caveAt(wx, y, wz) && y < h - 5) id = B.AIR;
+        else if (hash3(wx, y, wz, 60) < 0.010 && y < 40) id = B.COAL_ORE;
+      }
+      else if (y < h) id = sandy ? B.SAND : B.DIRT;
+      else if (y === h) id = sandy ? B.SAND : (snowy ? B.SNOW : B.GRASS);
+      else if (y <= SEA) id = B.WATER;
+      if (id) set(lx, y, lz, id);
+    }
+  }
+
+  /* 木（チャンク境界をまたぐ分は余白2マスも走査） */
+  for (let tx = -2; tx < CS + 2; tx++) for (let tz = -2; tz < CS + 2; tz++) {
+    const wx = bx0 + tx, wz = bz0 + tz;
+    if (!treeAt(wx, wz)) continue;
+    const h = Math.min(H - 2, Math.max(2, heightAt(wx, wz)));
+    if (h <= SEA + 1 || h >= 44 || h + 8 >= H) continue;
+    const th = 4 + Math.floor(hash2(wx, wz, 51) * 3); // 幹の高さ 4〜6
+    const put = (x, y, z, id, keepSolid) => {
+      const lx = x - bx0, lz = z - bz0;
+      if (lx < 0 || lx >= CS || lz < 0 || lz >= CS || y < 0 || y >= H) return;
+      if (keepSolid && get(lx, y, lz) !== B.AIR) return;
+      set(lx, y, lz, id);
+    };
+    for (let dy = th - 2; dy <= th + 1; dy++) {
+      const r = dy >= th ? 1 : 2;
+      for (let ox = -r; ox <= r; ox++) for (let oz = -r; oz <= r; oz++) {
+        if (ox === 0 && oz === 0 && dy < th) continue;
+        if (Math.abs(ox) === r && Math.abs(oz) === r && (dy >= th || hash3(wx + ox, h + dy, wz + oz, 52) < 0.5)) continue;
+        put(wx + ox, h + 1 + dy, wz + oz, B.LEAVES, true);
+      }
+    }
+    for (let dy = 1; dy <= th; dy++) put(wx, h + dy, wz, B.LOG, false);
+  }
+
+  /* プレイヤーの編集を反映 */
+  for (const [k, id] of editMap) {
+    const p = k.split(',');
+    const x = +p[0], y = +p[1], z = +p[2];
+    const lx = x - bx0, lz = z - bz0;
+    if (lx >= 0 && lx < CS && lz >= 0 && lz < CS && y >= 0 && y < H) set(lx, y, lz, id);
+  }
+  return data;
+}
+
+/* =====================================================================
+ *  ワールド管理
+ * ===================================================================== */
+const chunks = new Map();
+const editMap = new Map();
+try {
+  const saved = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
+  for (const k in saved) editMap.set(k, saved[k]);
+} catch (e) { /* 壊れたセーブは無視 */ }
+
+let saveTimer = null;
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(Object.fromEntries(editMap))); } catch (e) {}
+  }, 800);
+}
+
+function ckey(cx, cz) { return cx + ',' + cz; }
+function ensureData(cx, cz) {
+  const k = ckey(cx, cz);
+  let c = chunks.get(k);
+  if (!c) { c = { cx, cz, data: genChunk(cx, cz), mesh: null, waterMesh: null }; chunks.set(k, c); }
+  return c;
+}
+function getBlock(x, y, z) {
+  if (y < 0 || y >= H) return B.AIR;
+  const cx = Math.floor(x / CS), cz = Math.floor(z / CS);
+  const c = ensureData(cx, cz);
+  return c.data[((x - cx * CS) * H + y) * CS + (z - cz * CS)];
+}
+function setBlock(x, y, z, id) {
+  if (y < 0 || y >= H) return;
+  const cx = Math.floor(x / CS), cz = Math.floor(z / CS);
+  const c = ensureData(cx, cz);
+  c.data[((x - cx * CS) * H + y) * CS + (z - cz * CS)] = id;
+  editMap.set(x + ',' + y + ',' + z, id);
+  scheduleSave();
+  rebuildChunk(c);
+  const lx = x - cx * CS, lz = z - cz * CS;
+  if (lx === 0)      rebuildIfLoaded(cx - 1, cz);
+  if (lx === CS - 1) rebuildIfLoaded(cx + 1, cz);
+  if (lz === 0)      rebuildIfLoaded(cx, cz - 1);
+  if (lz === CS - 1) rebuildIfLoaded(cx, cz + 1);
+}
+function rebuildIfLoaded(cx, cz) {
+  const c = chunks.get(ckey(cx, cz));
+  if (c && c.mesh !== null || c && c.built) rebuildChunk(c);
+}
+
+/* =====================================================================
+ *  メッシュ生成（面カリング + アンビエントオクルージョン）
+ * ===================================================================== */
+/* 各面: n=法線, shade=固定陰影, c=四隅（外から見て反時計回り、UVは(0,0)(1,0)(1,1)(0,1)） */
+const FACES = [
+  /* シネマ版: 陰影は実ライティングと影に任せるため固定陰影を弱める */
+  { n:[ 1,0,0], shade:0.86, c:[[1,0,1],[1,0,0],[1,1,0],[1,1,1]] },
+  { n:[-1,0,0], shade:0.86, c:[[0,0,0],[0,0,1],[0,1,1],[0,1,0]] },
+  { n:[0, 1,0], shade:1.0,  c:[[0,1,1],[1,1,1],[1,1,0],[0,1,0]] },
+  { n:[0,-1,0], shade:0.7,  c:[[0,0,0],[1,0,0],[1,0,1],[0,0,1]] },
+  { n:[0,0, 1], shade:0.93, c:[[0,0,1],[1,0,1],[1,1,1],[0,1,1]] },
+  { n:[0,0,-1], shade:0.93, c:[[1,0,0],[0,0,0],[0,1,0],[1,1,0]] },
+];
+const FACE_UV = [[0,0],[1,0],[1,1],[0,1]];
+const AO_LEVELS = [0.5, 0.68, 0.84, 1.0];
+
+const opaqueMat = new THREE.MeshLambertMaterial({ map: atlasTex, vertexColors: true, alphaTest: 0.5 });
+const waterMat  = new THREE.MeshLambertMaterial({ map: atlasTex, vertexColors: true, transparent: true,
+                                                  opacity: 0.72, depthWrite: false, side: THREE.DoubleSide });
+
+/* シネマ版: 水面の波・フレネル反射・太陽のきらめき */
+const waterU = { uTime: { value: 0 }, uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+                 uSunCol: { value: new THREE.Color(1, 1, 1) }, uSky: { value: new THREE.Color(0.4, 0.6, 1) } };
+waterMat.color.setRGB(0.42, 0.58, 0.72);   // 深みのある水色に
+waterMat.onBeforeCompile = (sh) => {
+  Object.assign(sh.uniforms, waterU);
+  sh.vertexShader = sh.vertexShader
+    .replace('#include <common>', '#include <common>\nuniform float uTime;\nvarying vec3 vWPos;')
+    .replace('#include <begin_vertex>', `#include <begin_vertex>
+      if (position.y > ${(SEA + 0.5).toFixed(1)}) {
+        transformed.y += -0.14 + 0.05 * sin(position.x * 0.9 + uTime * 1.3)
+                               + 0.04 * sin(position.z * 1.1 + position.x * 0.3 + uTime * 1.7);
+      }
+      vWPos = transformed;`);
+  sh.fragmentShader = sh.fragmentShader
+    .replace('#include <common>', '#include <common>\nuniform float uTime;\nuniform vec3 uSunDir;\nuniform vec3 uSunCol;\nuniform vec3 uSky;\nvarying vec3 vWPos;')
+    .replace('#include <tonemapping_fragment>', `
+      {
+        vec3 V = normalize(cameraPosition - vWPos);
+        vec2 p = vWPos.xz; float t = uTime;
+        float ddx = 0.045 * cos(p.x * 0.9 + t * 1.3) + 0.06 * cos(p.x * 3.1 + p.y * 1.7 + t * 2.3) + 0.05 * cos(p.x * 5.3 - p.y * 4.1 - t * 3.1);
+        float ddz = 0.044 * cos(p.y * 1.1 + p.x * 0.3 + t * 1.7) + 0.06 * cos(p.y * 2.9 - p.x * 1.3 + t * 2.0) + 0.05 * cos(p.y * 6.1 + p.x * 3.7 + t * 2.7);
+        vec3 N = normalize(vec3(-ddx * 0.6, 1.0, -ddz * 0.6));
+        if (V.y < 0.0) N.y = -N.y;
+        float fr = 0.04 + 0.96 * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 4.0);
+        float spec = pow(max(dot(reflect(-V, N), uSunDir), 0.0), 160.0);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, uSky, fr * 0.65) + uSunCol * spec * 2.5;
+        gl_FragColor.a = mix(gl_FragColor.a, 0.96, fr);
+      }
+      #include <tonemapping_fragment>`);
+};
+
+function faceVisible(id, nb) {
+  if (nb === B.AIR) return true;
+  if (nb === id) return false;
+  const nd = BLOCKS[nb];
+  return !!(nd && nd.seeThrough);
+}
+
+function buildChunkGeometry(c) {
+  /* AO計算で隣接チャンクを参照するため、周囲8チャンクのデータを保証 */
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) ensureData(c.cx + dx, c.cz + dz);
+
+  const bx0 = c.cx * CS, bz0 = c.cz * CS;
+  function blk(lx, y, lz) {
+    if (y < 0) return B.BEDROCK;
+    if (y >= H) return B.AIR;
+    if (lx >= 0 && lx < CS && lz >= 0 && lz < CS) return c.data[(lx * H + y) * CS + lz];
+    return getBlock(bx0 + lx, y, bz0 + lz);
+  }
+  const occl = (lx, y, lz) => isOccluder(blk(lx, y, lz));
+
+  const o = { pos: [], nor: [], col: [], uv: [], idx: [] };
+  const w = { pos: [], nor: [], col: [], uv: [], idx: [] };
+
+  for (let lx = 0; lx < CS; lx++) for (let y = 0; y < H; y++) for (let lz = 0; lz < CS; lz++) {
+    const id = c.data[(lx * H + y) * CS + lz];
+    if (id === B.AIR) continue;
+    const def = BLOCKS[id];
+    const isWater = id === B.WATER;
+    const tgt = isWater ? w : o;
+
+    for (let f = 0; f < 6; f++) {
+      const F = FACES[f];
+      const nb = blk(lx + F.n[0], y + F.n[1], lz + F.n[2]);
+      if (!faceVisible(id, nb)) continue;
+
+      const tile = def.tiles[f];
+      const u0 = (tile + 0.02) / N_TILES, u1 = (tile + 0.98) / N_TILES;
+      const vi = tgt.pos.length / 3;
+      const nAxis = F.n[0] !== 0 ? 0 : (F.n[1] !== 0 ? 1 : 2);
+      const aos = [1, 1, 1, 1];
+
+      for (let k = 0; k < 4; k++) {
+        const cp = F.c[k];
+        tgt.pos.push(bx0 + lx + cp[0], y + cp[1], bz0 + lz + cp[2]);
+        tgt.nor.push(F.n[0], F.n[1], F.n[2]);
+        const uvk = FACE_UV[k];
+        tgt.uv.push(u0 + (u1 - u0) * uvk[0], (uvk[1] === 0 ? 0.02 : 0.98));
+
+        let br = F.shade;
+        if (!isWater) {
+          /* AO: 面の法線方向の1マス先の周囲を調べる */
+          let da = null, db = null;
+          for (let ax = 0; ax < 3; ax++) {
+            if (ax === nAxis) continue;
+            const d = [0, 0, 0];
+            d[ax] = cp[ax] === 1 ? 1 : -1;
+            if (!da) da = d; else db = d;
+          }
+          const px = lx + F.n[0], py = y + F.n[1], pz = lz + F.n[2];
+          const s1 = occl(px + da[0], py + da[1], pz + da[2]);
+          const s2 = occl(px + db[0], py + db[1], pz + db[2]);
+          const sc = occl(px + da[0] + db[0], py + da[1] + db[1], pz + da[2] + db[2]);
+          const ao = (s1 && s2) ? 0 : 3 - ((s1 ? 1 : 0) + (s2 ? 1 : 0) + (sc ? 1 : 0));
+          aos[k] = ao;
+          br *= AO_LEVELS[ao];
+        }
+        tgt.col.push(br, br, br);
+      }
+      /* AOの継ぎ目対策：明るさの対角和で三角形分割を反転 */
+      if (!isWater && aos[0] + aos[2] < aos[1] + aos[3]) {
+        tgt.idx.push(vi + 1, vi + 2, vi + 3, vi + 1, vi + 3, vi + 0);
+      } else {
+        tgt.idx.push(vi + 0, vi + 1, vi + 2, vi + 0, vi + 2, vi + 3);
+      }
+    }
+  }
+
+  function toGeom(a) {
+    if (a.idx.length === 0) return null;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(a.pos, 3));
+    g.setAttribute('normal',   new THREE.Float32BufferAttribute(a.nor, 3));
+    g.setAttribute('color',    new THREE.Float32BufferAttribute(a.col, 3));
+    g.setAttribute('uv',       new THREE.Float32BufferAttribute(a.uv, 2));
+    g.setIndex(a.idx.length > 65535 ? new THREE.Uint32BufferAttribute(a.idx, 1)
+                                    : new THREE.Uint16BufferAttribute(a.idx, 1));
+    return g;
+  }
+  return { opaque: toGeom(o), water: toGeom(w) };
+}
+
+function rebuildChunk(c) {
+  disposeChunkMesh(c);
+  const g = buildChunkGeometry(c);
+  if (g.opaque) { c.mesh = new THREE.Mesh(g.opaque, opaqueMat); c.mesh.castShadow = c.mesh.receiveShadow = true; scene.add(c.mesh); }
+  if (g.water)  { c.waterMesh = new THREE.Mesh(g.water, waterMat); c.waterMesh.renderOrder = 2; c.waterMesh.receiveShadow = true; scene.add(c.waterMesh); }
+  c.built = true;
+  shadowDirty = true;
+}
+function disposeChunkMesh(c) {
+  if (c.mesh)      { scene.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh = null; }
+  if (c.waterMesh) { scene.remove(c.waterMesh); c.waterMesh.geometry.dispose(); c.waterMesh = null; }
+  c.built = false;
+}
+
+/* =====================================================================
+ *  シーン・レンダラ
+ * ===================================================================== */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x78a7ff);
+scene.fog = new THREE.Fog(0x78a7ff, 40, RENDER_DIST * CS);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.08, 1200);
+camera.rotation.order = 'YXZ';
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.domElement.id = 'game';
+document.body.appendChild(renderer.domElement);
+
+/* ---- シネマ版: トーンマッピング・影・ポストエフェクト ---- */
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;   // Soft版より軽い
+
+const post = (() => {
+  const MSAA = parseInt(new URLSearchParams(location.search).get('msaa') || '4', 10);  // ?msaa=0 で軽量化
+  const RT = (MSAA > 0 && renderer.capabilities.isWebGL2 && THREE.WebGLMultisampleRenderTarget)
+    ? THREE.WebGLMultisampleRenderTarget : THREE.WebGLRenderTarget;
+  const opt = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat };
+  const rtScene = new RT(4, 4, opt);
+  rtScene.texture.encoding = THREE.sRGBEncoding;
+  if ('samples' in rtScene) rtScene.samples = MSAA;
+  const rtA = new THREE.WebGLRenderTarget(4, 4, Object.assign({ depthBuffer: false }, opt));
+  const rtB = new THREE.WebGLRenderTarget(4, 4, Object.assign({ depthBuffer: false }, opt));
+
+  const vs = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
+  const mk = (uniforms, fs) => new THREE.ShaderMaterial({ uniforms, vertexShader: vs, fragmentShader: fs,
+                                                         depthTest: false, depthWrite: false });
+  const bright = mk({ tD: { value: null } }, `
+    uniform sampler2D tD; varying vec2 vUv;
+    void main(){ vec3 c = texture2D(tD, vUv).rgb; float l = max(c.r, max(c.g, c.b));
+      gl_FragColor = vec4(c * smoothstep(0.84, 1.0, l), 1.0); }`);
+  const blur = mk({ tD: { value: null }, dir: { value: new THREE.Vector2() } }, `
+    uniform sampler2D tD; uniform vec2 dir; varying vec2 vUv;
+    void main(){
+      vec3 c = texture2D(tD, vUv).rgb * 0.227;
+      c += (texture2D(tD, vUv + dir * 1.385).rgb + texture2D(tD, vUv - dir * 1.385).rgb) * 0.316;
+      c += (texture2D(tD, vUv + dir * 3.231).rgb + texture2D(tD, vUv - dir * 3.231).rgb) * 0.0703;
+      gl_FragColor = vec4(c, 1.0); }`);
+  const comp = mk({ tD: { value: null }, tB: { value: null }, sunUV: { value: new THREE.Vector2(0.5, 0.5) },
+                    rayK: { value: 0 }, time: { value: 0 }, res: { value: new THREE.Vector2(1, 1) } }, `
+    uniform sampler2D tD; uniform sampler2D tB; uniform vec2 sunUV; uniform float rayK; uniform float time; uniform vec2 res;
+    varying vec2 vUv;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+    void main(){
+      vec3 c = texture2D(tD, vUv).rgb;
+      vec3 add = texture2D(tB, vUv).rgb * 0.5;                /* ブルーム */
+      if (rayK > 0.001) {                                        /* 光芒（ゴッドレイ） */
+        vec2 d = (sunUV - vUv) / 16.0 * 0.92; vec2 p = vUv; float w = 1.0; vec3 r = vec3(0.0);
+        for (int i = 0; i < 16; i++) { p += d; r += texture2D(tB, p).rgb * w; w *= 0.935; }
+        add += r / 9.5 * rayK;
+      }
+      c = 1.0 - (1.0 - c) * (1.0 - clamp(add, 0.0, 1.0));       /* スクリーン合成 */
+      c = mix(c, c * c * (3.0 - 2.0 * c), 0.32);                /* コントラスト */
+      float l = dot(c, vec3(0.299, 0.587, 0.114));
+      c = mix(vec3(l), c, 1.03);                               /* 彩度 */
+      c += mix(vec3(-0.012, 0.004, 0.022), vec3(0.022, 0.008, -0.02), smoothstep(0.15, 0.85, l)); /* ティール&オレンジ */
+      float v = 1.0 - smoothstep(0.38, 1.0, length((vUv - 0.5) * vec2(1.25, 1.0)) * 1.35);
+      c *= mix(0.55, 1.0, v);                                    /* ビネット */
+      c += (hash(vUv * res + fract(time) * 91.7) - 0.5) * 0.022; /* フィルムグレイン */
+      gl_FragColor = vec4(c, 1.0); }`);
+
+  const qScene = new THREE.Scene();
+  const qCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bright);
+  quad.frustumCulled = false;
+  qScene.add(quad);
+  const size = new THREE.Vector2();
+  let bw = 1, bh = 1;
+  function resize() {
+    renderer.getDrawingBufferSize(size);
+    rtScene.setSize(size.x, size.y);
+    bw = Math.max(2, size.x >> 2); bh = Math.max(2, size.y >> 2);
+    rtA.setSize(bw, bh); rtB.setSize(bw, bh);
+    comp.uniforms.res.value.copy(size);
+  }
+  function pass(mat, target) { quad.material = mat; renderer.setRenderTarget(target); renderer.render(qScene, qCam); }
+  function render(scene, camera) {
+    renderer.setRenderTarget(rtScene);
+    renderer.render(scene, camera);
+    bright.uniforms.tD.value = rtScene.texture; pass(bright, rtA);
+    for (let i = 0; i < 2; i++) {
+      const s = 1 + i * 1.5;
+      blur.uniforms.tD.value = rtA.texture; blur.uniforms.dir.value.set(s / bw, 0); pass(blur, rtB);
+      blur.uniforms.tD.value = rtB.texture; blur.uniforms.dir.value.set(0, s / bh); pass(blur, rtA);
+    }
+    comp.uniforms.tD.value = rtScene.texture; comp.uniforms.tB.value = rtA.texture;
+    pass(comp, null);
+  }
+  resize();
+  return { render, resize, comp };
+})();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  post.resize();
+});
+
+/* シネマ版: 環境光は半球ライト、太陽/月は影を落とす平行光 */
+const ambient = new THREE.HemisphereLight(0xbfd8ff, 0x6b5a48, 0.75);
+scene.add(ambient);
+const sunLight = new THREE.DirectionalLight(0xffffff, 0.6);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(2048, 2048);
+sunLight.shadow.camera.left = -64; sunLight.shadow.camera.right = 64;
+sunLight.shadow.camera.top = 64;   sunLight.shadow.camera.bottom = -64;
+sunLight.shadow.autoUpdate = false;
+const shadowC = new THREE.Vector3(1e9, 0, 0);
+let shadowAge = 0, shadowDirty = true;
+sunLight.shadow.camera.near = 1;   sunLight.shadow.camera.far = 320;
+sunLight.shadow.bias = -0.0006;
+sunLight.shadow.normalBias = 0.05;
+scene.add(sunLight);
+scene.add(sunLight.target);
+
+/* シネマ版: グラデーション空ドーム（太陽の輝き・月を含む） */
+const skyU = { sunDir: { value: new THREE.Vector3(0, 1, 0) }, zenith: { value: new THREE.Color() },
+               horizon: { value: new THREE.Color() }, glowCol: { value: new THREE.Color() },
+               glowK: { value: 1 }, moonK: { value: 0 } };
+const skyDome = new THREE.Mesh(new THREE.SphereGeometry(900, 32, 16), new THREE.ShaderMaterial({
+  uniforms: skyU, side: THREE.BackSide, depthTest: false, depthWrite: false, fog: false,
+  vertexShader: 'varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `
+    uniform vec3 sunDir; uniform vec3 zenith; uniform vec3 horizon; uniform vec3 glowCol; uniform float glowK; uniform float moonK;
+    varying vec3 vDir;
+    void main(){
+      vec3 d = normalize(vDir);
+      float h = max(d.y, 0.0);
+      vec3 col = mix(horizon, zenith, pow(smoothstep(0.0, 0.85, h), 0.6));
+      float above = smoothstep(-0.03, 0.03, d.y);
+      float s = max(dot(d, sunDir), 0.0);
+      col += glowCol * (pow(s, 6.0) * 0.10 + pow(s, 48.0) * 0.16 + pow(s, 400.0) * 0.45) * glowK * (0.35 + 0.65 * above);
+      col += vec3(1.0, 0.96, 0.85) * smoothstep(0.99915, 0.99955, s) * above * 1.5;
+      float m = max(dot(d, -sunDir), 0.0);
+      col += (vec3(0.80, 0.86, 1.0) * smoothstep(0.9993, 0.9996, m) * 0.9 + vec3(0.25, 0.32, 0.5) * pow(m, 300.0) * 0.5) * above * moonK;
+      gl_FragColor = vec4(col, 1.0);
+    }` }));
+skyDome.renderOrder = -10;
+skyDome.frustumCulled = false;
+scene.add(skyDome);
+
+/* 太陽と月（Minecraftと同じく四角い） */
+const sunMesh = new THREE.Mesh(new THREE.PlaneGeometry(70, 70),
+  new THREE.MeshBasicMaterial({ color: 0xfff7c0, fog: false, depthWrite: false }));
+const moonMesh = new THREE.Mesh(new THREE.PlaneGeometry(46, 46),
+  new THREE.MeshBasicMaterial({ color: 0xd8dee8, fog: false, depthWrite: false }));
+scene.add(sunMesh); scene.add(moonMesh);
+
+/* 星 */
+const starGeo = new THREE.BufferGeometry();
+{
+  const sp = [];
+  const srnd = mulberry32(seed + 9);
+  for (let i = 0; i < 350; i++) {
+    const t = srnd() * Math.PI * 2, p = Math.acos(srnd() * 2 - 1);
+    sp.push(500 * Math.sin(p) * Math.cos(t), Math.abs(500 * Math.cos(p)) , 500 * Math.sin(p) * Math.sin(t));
+  }
+  starGeo.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
+}
+const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, fog: false, transparent: true, opacity: 0, sizeAttenuation: false });
+const stars = new THREE.Points(starGeo, starMat);
+scene.add(stars);
+
+/* 雲（タイル状ノイズテクスチャの大きな板） */
+const cloudCanvas = document.createElement('canvas');
+cloudCanvas.width = cloudCanvas.height = 256;
+{
+  const cc = cloudCanvas.getContext('2d');
+  /* シネマ版: なめらかな濃淡を持つソフトな雲 */
+  const img = cc.createImageData(256, 256);
+  for (let gy = 0; gy < 256; gy++) for (let gx = 0; gx < 256; gx++) {
+    const u = gx / 256, v = gy / 256;
+    const n = wnoise(u * 6, v * 6, 6, 70) + 0.5 * wnoise(u * 12, v * 12, 12, 71)
+            + 0.25 * wnoise(u * 24, v * 24, 24, 72) + 0.12 * wnoise(u * 48, v * 48, 48, 73);
+    const a = Math.min(1, Math.max(0, (n - 0.08) / 0.5));
+    const i = (gy * 256 + gx) * 4;
+    const shade = 215 + 40 * Math.min(1, a * 1.4);
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = shade;
+    img.data[i + 3] = 235 * a * a * (3 - 2 * a);
+  }
+  cc.putImageData(img, 0, 0);
+}
+const cloudTex = new THREE.CanvasTexture(cloudCanvas);
+cloudTex.magFilter = cloudTex.minFilter = THREE.LinearFilter;
+cloudTex.generateMipmaps = false;
+cloudTex.wrapS = cloudTex.wrapT = THREE.RepeatWrapping;
+cloudTex.repeat.set(4, 4);
+const cloudMat = new THREE.MeshBasicMaterial({ map: cloudTex, transparent: true, fog: false,
+                                               depthWrite: false, side: THREE.DoubleSide });
+cloudMat.toneMapped = false;
+cloudMat.onBeforeCompile = (sh) => {   /* 遠方で地平線へ溶け込ませる */
+  sh.vertexShader = sh.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying vec2 vCP;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCP = position.xy;');
+  sh.fragmentShader = sh.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying vec2 vCP;')
+    .replace('#include <tonemapping_fragment>',
+             'gl_FragColor.a *= 1.0 - smoothstep(250.0, 1100.0, length(vCP));\n#include <tonemapping_fragment>');
+};
+const clouds = new THREE.Mesh(new THREE.PlaneGeometry(2400, 2400), cloudMat);
+clouds.rotation.x = -Math.PI / 2;
+clouds.position.y = 100;
+clouds.renderOrder = 1;
+scene.add(clouds);
+
+/* ブロックのハイライト枠 */
+const hlBox = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(1.002, 1.002, 1.002)),
+  new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.7 }));
+hlBox.visible = false;
+scene.add(hlBox);
+
+/* =====================================================================
+ *  プレイヤー
+ * ===================================================================== */
+const player = {
+  pos: new THREE.Vector3(8.5, 40, 8.5), // 足元中心
+  vel: new THREE.Vector3(),
+  yaw: Math.PI * 0.25, pitch: -0.1,
+  onGround: false, flying: false, sneaking: false, sprinting: false,
+};
+
+function spawnPlayer() {
+  const x = 8, z = 8;
+  let y = Math.max(heightAt(x, z), SEA) + 1;
+  while (y < H - 2 && isSolid(getBlock(x, y, z))) y++;
+  player.pos.set(x + 0.5, y + 0.2, z + 0.5);
+  player.vel.set(0, 0, 0);
+}
+
+function collidesAt(px, py, pz) {
+  const x0 = Math.floor(px - PW), x1 = Math.floor(px + PW);
+  const y0 = Math.floor(py),      y1 = Math.floor(py + PH);
+  const z0 = Math.floor(pz - PW), z1 = Math.floor(pz + PW);
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++)
+    if (y >= 0 && y < H && isSolid(getBlock(x, y, z))) return true;
+  return false;
+}
+/* 1軸ずつマイクロステップで移動（めり込み防止）。ぶつかったら true */
+function moveAxis(axis, delta) {
+  if (delta === 0) return false;
+  const steps = Math.max(1, Math.ceil(Math.abs(delta) / 0.05));
+  const d = delta / steps;
+  for (let i = 0; i < steps; i++) {
+    player.pos[axis] += d;
+    if (collidesAt(player.pos.x, player.pos.y, player.pos.z)) {
+      player.pos[axis] -= d;
+      return true;
+    }
+  }
+  return false;
+}
+
+const keys = {};
+let lastSpace = 0;
+/* シネマ版: カメラ演出用の状態 */
+const cine = { bobPhase: 0, bobAmt: 0, landDip: 0, eye: EYE, yaw: player.yaw, pitch: player.pitch, roll: 0 };
+
+function updatePlayer(dt) {
+  const inWaterFeet = getBlock(Math.floor(player.pos.x), Math.floor(player.pos.y + 0.4), Math.floor(player.pos.z)) === B.WATER;
+  const inWaterHead = getBlock(Math.floor(player.pos.x), Math.floor(player.pos.y + EYE), Math.floor(player.pos.z)) === B.WATER;
+
+  /* 移動入力（視線方向基準） */
+  let mx = 0, mz = 0;
+  if (keys['KeyW']) mz -= 1;
+  if (keys['KeyS']) mz += 1;
+  if (keys['KeyA']) mx -= 1;
+  if (keys['KeyD']) mx += 1;
+  const moving = mx !== 0 || mz !== 0;
+  player.sneaking = !player.flying && !!keys['ShiftLeft'];
+  player.sprinting = !!keys['ControlLeft'] && keys['KeyW'] && !player.sneaking;
+
+  let speed = player.flying ? FLY_SPEED : (player.sprinting ? SPRINT_SPEED : (player.sneaking ? SNEAK_SPEED : WALK_SPEED));
+  if (inWaterFeet && !player.flying) speed *= 0.55;
+
+  let dx = 0, dz = 0;
+  if (moving) {
+    const len = Math.hypot(mx, mz);
+    mx /= len; mz /= len;
+    const s = Math.sin(player.yaw), c = Math.cos(player.yaw);
+    /* シネマ版: 視線方向と移動方向のずれを修正（前=(-sin,-cos), 右=(cos,-sin)） */
+    dx = (mx * c + mz * s) * speed;
+    dz = (-mx * s + mz * c) * speed;
+  }
+  /* シネマ版: 加減速に慣性を持たせて滑らかに */
+  const accK = 1 - Math.exp(-(player.flying ? 4.5 : (player.onGround ? 13 : 5)) * dt);
+  player.vel.x += (dx - player.vel.x) * accK;
+  player.vel.z += (dz - player.vel.z) * accK;
+  const prevVy = player.vel.y, wasGround = player.onGround;
+
+  if (player.flying) {
+    let ty = 0;
+    if (keys['Space']) ty = FLY_SPEED * 0.8;
+    if (keys['ShiftLeft']) ty = -FLY_SPEED * 0.8;
+    player.vel.y += (ty - player.vel.y) * (1 - Math.exp(-6 * dt));
+  } else if (inWaterFeet) {
+    player.vel.y -= GRAVITY * 0.25 * dt;
+    player.vel.y *= Math.max(0, 1 - 2.5 * dt); // 水の抵抗
+    if (keys['Space']) player.vel.y = Math.min(player.vel.y + 24 * dt, 3.6);
+    if (player.vel.y < -4) player.vel.y = -4;
+  } else {
+    player.vel.y -= GRAVITY * dt;
+    if (player.vel.y < -78) player.vel.y = -78;
+    if (keys['Space'] && player.onGround) { player.vel.y = JUMP_V; player.onGround = false; }
+  }
+
+  if (moveAxis('x', player.vel.x * dt)) player.vel.x = 0;
+  if (moveAxis('z', player.vel.z * dt)) player.vel.z = 0;
+  const hitY = moveAxis('y', player.vel.y * dt);
+  if (hitY) {
+    if (player.vel.y < 0) { player.onGround = true; if (player.flying) player.flying = false; }
+    player.vel.y = 0;
+  } else if (player.vel.y !== 0) {
+    player.onGround = false;
+  }
+
+  /* 奈落に落ちたら復帰 */
+  if (player.pos.y < -24) spawnPlayer();
+
+  /* 足音 */
+  if (player.onGround && !player.flying && moving) {
+    stepDist += Math.hypot(player.vel.x, player.vel.z) * dt;
+    if (stepDist > 2.2) { stepDist = 0; sfx('step'); }
+  }
+
+  /* カメラ */
+  /* シネマ版: 歩行の揺れ・着地の沈み込み・ストレイフ時の傾き・視点の補間 */
+  const hs = Math.hypot(player.vel.x, player.vel.z);
+  const walking = player.onGround && !player.flying && hs > 0.4;
+  if (walking) cine.bobPhase += hs * dt * 1.43;
+  cine.bobAmt += ((walking ? Math.min(1.3, hs / WALK_SPEED) : 0) - cine.bobAmt) * (1 - Math.exp(-8 * dt));
+  if (!wasGround && player.onGround && prevVy < -5) cine.landDip = Math.min(0.38, -prevVy * 0.02);
+  cine.landDip *= Math.exp(-9 * dt);
+  cine.eye += ((player.sneaking ? EYE - 0.22 : EYE) - cine.eye) * (1 - Math.exp(-14 * dt));
+  const lookK = 1 - Math.exp(-38 * dt);
+  cine.yaw += (player.yaw - cine.yaw) * lookK;
+  cine.pitch += (player.pitch - cine.pitch) * lookK;
+  const rx = Math.cos(cine.yaw), rz = -Math.sin(cine.yaw);          // カメラの右方向
+  const side = Math.cos(cine.bobPhase) * 0.035 * cine.bobAmt;
+  camera.position.set(player.pos.x + rx * side,
+                      player.pos.y + cine.eye + Math.sin(cine.bobPhase * 2) * 0.05 * cine.bobAmt - cine.landDip,
+                      player.pos.z + rz * side);
+  const strafe = (player.vel.x * rx + player.vel.z * rz) / FLY_SPEED;
+  cine.roll += (-strafe * (player.flying ? 0.09 : 0.05) - cine.roll) * (1 - Math.exp(-6 * dt));
+  camera.rotation.y = cine.yaw;
+  camera.rotation.x = cine.pitch - cine.landDip * 0.12;
+  camera.rotation.z = cine.roll;
+
+  const spd = Math.hypot(hs, player.vel.y);
+  const targetFov = 70 + (player.sprinting ? 9 : 0) + (player.flying ? 3 : 0) + Math.min(9, Math.max(0, spd - WALK_SPEED) * 0.9);
+  if (Math.abs(camera.fov - targetFov) > 0.05) {
+    camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 6);
+    camera.updateProjectionMatrix();
+  }
+  return inWaterHead;
+}
+
+/* =====================================================================
+ *  レイキャスト（DDA）とブロック操作
+ * ===================================================================== */
+function raycast(maxDist) {
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  const o = camera.position;
+  let x = Math.floor(o.x), y = Math.floor(o.y), z = Math.floor(o.z);
+  const stepX = dir.x > 0 ? 1 : -1, stepY = dir.y > 0 ? 1 : -1, stepZ = dir.z > 0 ? 1 : -1;
+  const tdx = Math.abs(1 / (dir.x || 1e-10)), tdy = Math.abs(1 / (dir.y || 1e-10)), tdz = Math.abs(1 / (dir.z || 1e-10));
+  let tmx = (dir.x > 0 ? (x + 1 - o.x) : (o.x - x)) * tdx;
+  let tmy = (dir.y > 0 ? (y + 1 - o.y) : (o.y - y)) * tdy;
+  let tmz = (dir.z > 0 ? (z + 1 - o.z) : (o.z - z)) * tdz;
+  let n = [0, 0, 0], t = 0;
+  for (let i = 0; i < 128; i++) {
+    if (t > maxDist) return null;
+    if (y >= 0 && y < H) {
+      const id = getBlock(x, y, z);
+      if (id !== B.AIR && id !== B.WATER) return { x, y, z, id, n };
+    }
+    if (tmx < tmy && tmx < tmz)      { x += stepX; t = tmx; tmx += tdx; n = [-stepX, 0, 0]; }
+    else if (tmy < tmz)              { y += stepY; t = tmy; tmy += tdy; n = [0, -stepY, 0]; }
+    else                             { z += stepZ; t = tmz; tmz += tdz; n = [0, 0, -stepZ]; }
+  }
+  return null;
+}
+
+function blockIntersectsPlayer(x, y, z) {
+  return x + 1 > player.pos.x - PW && x < player.pos.x + PW &&
+         y + 1 > player.pos.y      && y < player.pos.y + PH &&
+         z + 1 > player.pos.z - PW && z < player.pos.z + PW;
+}
+
+function tryBreak() {
+  const hit = raycast(REACH);
+  if (!hit) return;
+  const def = BLOCKS[hit.id];
+  if (def && def.unbreakable) return;
+  spawnParticles(hit.x, hit.y, hit.z, hit.id);
+  setBlock(hit.x, hit.y, hit.z, B.AIR);
+  sfx('dig');
+}
+function tryPlace() {
+  const hit = raycast(REACH);
+  if (!hit) return;
+  const tx = hit.x + hit.n[0], ty = hit.y + hit.n[1], tz = hit.z + hit.n[2];
+  if (ty < 0 || ty >= H) return;
+  const cur = getBlock(tx, ty, tz);
+  if (cur !== B.AIR && cur !== B.WATER) return;
+  const id = HOTBAR_ITEMS[selSlot];
+  if (isSolid(id) && blockIntersectsPlayer(tx, ty, tz)) return;
+  setBlock(tx, ty, tz, id);
+  sfx('place');
+}
+function tryPick() {
+  const hit = raycast(REACH);
+  if (!hit) return;
+  const i = HOTBAR_ITEMS.indexOf(hit.id);
+  if (i >= 0) selectSlot(i);
+}
+
+/* =====================================================================
+ *  パーティクル（ブロック破壊）
+ * ===================================================================== */
+const particles = [];
+const partGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
+const partMats = new Map();
+function partMat(tile) {
+  if (!partMats.has(tile)) partMats.set(tile, new THREE.MeshLambertMaterial({ color: tileAvg[tile] }));
+  return partMats.get(tile);
+}
+function spawnParticles(x, y, z, id) {
+  const tile = BLOCKS[id].tiles[2];
+  for (let i = 0; i < 18; i++) {
+    const m = new THREE.Mesh(partGeo, partMat(tile));
+    m.castShadow = true;
+    m.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+    m.position.set(x + 0.2 + Math.random() * 0.6, y + 0.2 + Math.random() * 0.6, z + 0.2 + Math.random() * 0.6);
+    scene.add(m);
+    particles.push({ m, vx: (Math.random() - 0.5) * 3.5, vy: 2 + Math.random() * 3, vz: (Math.random() - 0.5) * 3.5, life: 0.55 + Math.random() * 0.25 });
+  }
+}
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { scene.remove(p.m); particles.splice(i, 1); continue; }
+    p.vy -= GRAVITY * 0.55 * dt;
+    p.m.position.x += p.vx * dt; p.m.position.y += p.vy * dt; p.m.position.z += p.vz * dt;
+    const s = Math.min(1, p.life * 3);
+    p.m.scale.set(s, s, s);
+    p.m.rotation.x += dt * 7; p.m.rotation.z += dt * 5;
+  }
+}
+
+/* =====================================================================
+ *  サウンド（WebAudioで合成）
+ * ===================================================================== */
+let audioCtx = null, noiseBuf = null;
+function initAudio() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    noiseBuf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.3, audioCtx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  } catch (e) { audioCtx = null; }
+}
+function sfx(type) {
+  if (!audioCtx || audioCtx.state !== 'running') return;
+  const t = audioCtx.currentTime;
+  const src = audioCtx.createBufferSource();
+  src.buffer = noiseBuf;
+  const bp = audioCtx.createBiquadFilter();
+  bp.type = 'bandpass';
+  const g = audioCtx.createGain();
+  let dur = 0.09, vol = 0.22, freq = 700;
+  if (type === 'place') { freq = 320; dur = 0.11; vol = 0.2; }
+  if (type === 'step')  { freq = 520; dur = 0.05; vol = 0.07; }
+  bp.frequency.value = freq * (0.9 + Math.random() * 0.25);
+  bp.Q.value = 1.2;
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(bp).connect(g).connect(audioCtx.destination);
+  src.start(t); src.stop(t + dur + 0.02);
+}
+let stepDist = 0;
+
+/* =====================================================================
+ *  HUD（ホットバー・アイテム名・デバッグ）
+ * ===================================================================== */
+let selSlot = 0;
+const hotbarEl = document.getElementById('hotbar');
+const itemnameEl = document.getElementById('itemname');
+let itemnameTimer = null;
+const slotEls = [];
+
+function shadedTile(tile, dark) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 16;
+  const c = cv.getContext('2d');
+  c.drawImage(atlas, tile * 16, 0, 16, 16, 0, 0, 16, 16);
+  if (dark > 0) {
+    c.globalCompositeOperation = 'source-atop';
+    c.fillStyle = `rgba(0,0,0,${dark})`;
+    c.fillRect(0, 0, 16, 16);
+  }
+  return cv;
+}
+function drawIcon(id) {
+  const def = BLOCKS[id];
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 40;
+  const c = cv.getContext('2d');
+  c.imageSmoothingEnabled = false;
+  const w = 13, h = 6.5, d = 13, cx = 20, cy = 5;
+  const top = shadedTile(def.tiles[2], 0);
+  const left = shadedTile(def.tiles[4], 0.22);
+  const right = shadedTile(def.tiles[0], 0.42);
+  c.setTransform(w / 16, h / 16, -w / 16, h / 16, cx, cy);
+  c.drawImage(top, 0, 0);
+  c.setTransform(w / 16, h / 16, 0, d / 16, cx - w, cy + h);
+  c.drawImage(left, 0, 0);
+  c.setTransform(w / 16, -h / 16, 0, d / 16, cx, cy + 2 * h);
+  c.drawImage(right, 0, 0);
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  return cv;
+}
+function buildHotbar() {
+  for (let i = 0; i < HOTBAR_ITEMS.length; i++) {
+    const slot = document.createElement('div');
+    slot.className = 'slot' + (i === 0 ? ' sel' : '');
+    slot.appendChild(drawIcon(HOTBAR_ITEMS[i]));
+    hotbarEl.appendChild(slot);
+    slotEls.push(slot);
+  }
+}
+function selectSlot(i) {
+  slotEls[selSlot].classList.remove('sel');
+  selSlot = ((i % 9) + 9) % 9;
+  slotEls[selSlot].classList.add('sel');
+  itemnameEl.textContent = BLOCKS[HOTBAR_ITEMS[selSlot]].name;
+  itemnameEl.style.opacity = 1;
+  clearTimeout(itemnameTimer);
+  itemnameTimer = setTimeout(() => { itemnameEl.style.opacity = 0; }, 1400);
+}
+buildHotbar();
+
+const debugEl = document.getElementById('debug');
+let showDebug = false, fpsEma = 60, debugTick = 0;
+
+/* =====================================================================
+ *  入力
+ * ===================================================================== */
+const menuEl = document.getElementById('menu');
+let locked = false;
+
+function requestLock() {
+  initAudio();
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  renderer.domElement.requestPointerLock();
+}
+menuEl.addEventListener('click', (e) => {
+  if (e.target.id === 'btn-new' || e.target.id === 'btn-reset') return;
+  requestLock();
+});
+document.getElementById('btn-new').addEventListener('click', (e) => {
+  e.stopPropagation();
+  localStorage.setItem('mcworld_seed', String((Math.random() * 2 ** 31) | 0));
+  location.reload();
+});
+document.getElementById('btn-reset').addEventListener('click', (e) => {
+  e.stopPropagation();
+  localStorage.removeItem(SAVE_KEY);
+  location.reload();
+});
+document.addEventListener('pointerlockchange', () => {
+  locked = document.pointerLockElement === renderer.domElement;
+  menuEl.style.display = locked ? 'none' : 'flex';
+});
+document.addEventListener('mousemove', (e) => {
+  if (!locked) return;
+  player.yaw -= e.movementX * 0.0022;
+  player.pitch -= e.movementY * 0.0022;
+  const lim = Math.PI / 2 - 0.001;
+  player.pitch = Math.max(-lim, Math.min(lim, player.pitch));
+});
+
+const mouseHeld = [false, false, false];
+let mouseRepeat = 0;
+document.addEventListener('mousedown', (e) => {
+  if (!locked) return;
+  mouseHeld[e.button] = true;
+  mouseRepeat = 0.25;
+  if (e.button === 0) tryBreak();
+  if (e.button === 1) { e.preventDefault(); tryPick(); }
+  if (e.button === 2) tryPlace();
+});
+document.addEventListener('mouseup', (e) => { mouseHeld[e.button] = false; });
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+document.addEventListener('wheel', (e) => {
+  if (!locked) return;
+  selectSlot(selSlot + (e.deltaY > 0 ? 1 : -1));
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'F3') { e.preventDefault(); showDebug = !showDebug; debugEl.style.display = showDebug ? 'block' : 'none'; return; }
+  if (!locked) return;
+  keys[e.code] = true;
+  if (e.code.startsWith('Digit')) {
+    const n = +e.code.slice(5);
+    if (n >= 1 && n <= 9) selectSlot(n - 1);
+  }
+  if (e.code === 'Space') {
+    e.preventDefault();
+    const now = performance.now();
+    if (now - lastSpace < 280) { player.flying = !player.flying; player.vel.y = 0; lastSpace = 0; }
+    else lastSpace = now;
+  }
+});
+document.addEventListener('keyup', (e) => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+/* =====================================================================
+ *  チャンクストリーミング
+ * ===================================================================== */
+const buildQueue = [];
+function updateChunks() {
+  const pcx = Math.floor(player.pos.x / CS), pcz = Math.floor(player.pos.z / CS);
+  buildQueue.length = 0;
+  for (let dx = -RENDER_DIST; dx <= RENDER_DIST; dx++) for (let dz = -RENDER_DIST; dz <= RENDER_DIST; dz++) {
+    const dist2 = dx * dx + dz * dz;
+    if (dist2 > (RENDER_DIST + 0.5) ** 2) continue;
+    const cx = pcx + dx, cz = pcz + dz;
+    const c = chunks.get(ckey(cx, cz));
+    if (!c || !c.built) buildQueue.push({ cx, cz, d: dist2 });
+  }
+  buildQueue.sort((a, b) => a.d - b.d);
+  /* 範囲外のメッシュを破棄（データは保持） */
+  for (const c of chunks.values()) {
+    if (!c.built) continue;
+    const dx = c.cx - pcx, dz = c.cz - pcz;
+    if (dx * dx + dz * dz > (RENDER_DIST + 2) ** 2) disposeChunkMesh(c);
+  }
+}
+function processQueue(n) {
+  for (let i = 0; i < n && buildQueue.length > 0; i++) {
+    const q = buildQueue.shift();
+    const c = ensureData(q.cx, q.cz);
+    if (!c.built) rebuildChunk(c);
+  }
+}
+
+/* =====================================================================
+ *  昼夜サイクル
+ * ===================================================================== */
+let timeOfDay = 0.30; // 0=真夜中, 0.25=朝, 0.5=正午
+const DAY = new THREE.Color(0x78a7ff), NIGHT = new THREE.Color(0x04060f), DUSK = new THREE.Color(0xff8c3a);
+const skyCol = new THREE.Color();
+/* シネマ版の空・光のパレット */
+const DAY_H = new THREE.Color(0xa6c9f2), DAY_Z = new THREE.Color(0x2a66cf);
+const NIGHT_H = new THREE.Color(0x0b1428), DUSK_Z = new THREE.Color(0x4a3a78);
+const SUN_LOW = new THREE.Color(0xff9a52), SUN_HIGH = new THREE.Color(0xfff1dc);
+const MOON_COL = new THREE.Color(0x8fa8ff), WHITE = new THREE.Color(0xffffff);
+const DUSK_CLOUD = new THREE.Color(0xff9d78);
+const zenCol = new THREE.Color();
+const sunDirV = new THREE.Vector3(), lightDirV = new THREE.Vector3();
+const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3();
+
+function updateSky(dt) {
+  timeOfDay = (timeOfDay + dt / DAY_LENGTH) % 1;
+  const a = timeOfDay * Math.PI * 2 - Math.PI / 2; // 0.25で太陽が真上
+  const sunH = Math.sin(a);
+  const dayF = Math.min(1, Math.max(0, (sunH + 0.12) / 0.35));
+
+  /* シネマ版: 地平線色(=フォグ色)と天頂色を分け、朝夕は強く色づける */
+  const duskF = Math.max(0, 1 - Math.abs(sunH) / 0.32) * Math.min(1, dayF + 0.25);
+  skyCol.copy(NIGHT_H).lerp(DAY_H, dayF).lerp(DUSK, duskF * 0.8);
+  zenCol.copy(NIGHT).lerp(DAY_Z, dayF).lerp(DUSK_Z, duskF * 0.6);
+  scene.background = skyCol;
+  scene.fog.color.copy(skyCol);
+
+  const sx = Math.cos(a), sy = Math.sin(a);
+  const p = player.pos;
+  sunDirV.set(sx, sy, 0.3).normalize();
+  const sunUp = Math.min(1, Math.max(0, (sy + 0.04) / 0.16));   // 太陽光の強さ
+  const moonUp = Math.min(1, Math.max(0, (-sy - 0.04) / 0.16)); // 月光の強さ
+  const useSun = sy > -0.04;
+  lightDirV.set(useSun ? sx : -sx, Math.max(Math.abs(sy), 0.16), useSun ? 0.3 : -0.3).normalize();
+  const warm = Math.min(1, Math.max(0, sy / 0.45));
+  if (useSun) { sunLight.color.copy(SUN_LOW).lerp(SUN_HIGH, warm); sunLight.intensity = 1.55 * sunUp; }
+  else        { sunLight.color.copy(MOON_COL); sunLight.intensity = 0.32 * moonUp; }
+  ambient.color.copy(zenCol).lerp(WHITE, 0.55);
+  ambient.intensity = 0.2 + 0.62 * dayF;
+
+  /* 影のちらつきを抑えるため、影カメラの中心はブロック単位にスナップ */
+  /* 負荷対策: 影マップは「8ブロック移動した / 地形が変わった / 1秒経過」のときだけ描き直す */
+  const cxs = Math.round(p.x / 8) * 8, cys = Math.round(p.y / 8) * 8, czs = Math.round(p.z / 8) * 8;
+  shadowAge += dt;
+  if (cxs !== shadowC.x || cys !== shadowC.y || czs !== shadowC.z || shadowAge > 1 || (shadowDirty && shadowAge > 0.12)) {
+    shadowC.set(cxs, cys, czs); shadowAge = 0; shadowDirty = false;
+    sunLight.position.set(cxs + lightDirV.x * 140, cys + lightDirV.y * 140, czs + lightDirV.z * 140);
+    sunLight.target.position.set(cxs, cys, czs);
+    sunLight.shadow.needsUpdate = true;
+  }
+
+  sunMesh.visible = false;   // 太陽と月は空ドームのシェーダで描画
+  moonMesh.visible = false;
+  skyDome.position.copy(camera.position);
+  skyU.sunDir.value.copy(sunDirV);
+  skyU.zenith.value.copy(zenCol);
+  skyU.horizon.value.copy(skyCol);
+  skyU.glowCol.value.copy(SUN_LOW).lerp(SUN_HIGH, warm);
+  skyU.glowK.value = Math.min(1, Math.max(0, (sy + 0.2) / 0.3)) * (1 + duskF * 0.8);
+  skyU.moonK.value = 1 - dayF * 0.85;
+
+  waterU.uTime.value = performance.now() * 0.001;
+  waterU.uSunDir.value.copy(lightDirV);
+  waterU.uSunCol.value.copy(sunLight.color).multiplyScalar(useSun ? sunUp : moonUp * 0.25);
+  waterU.uSky.value.copy(skyCol).lerp(zenCol, 0.45).convertSRGBToLinear();
+
+  /* 光芒: 太陽(夜は月)の画面位置と強さ */
+  camera.updateMatrixWorld();
+  camera.getWorldDirection(tmpV);
+  const facing = Math.max(0, tmpV.dot(useSun ? sunDirV : tmpV2.copy(sunDirV).negate()));
+  tmpV2.copy(useSun ? sunDirV : tmpV2).multiplyScalar(200).add(camera.position).project(camera);
+  post.comp.uniforms.sunUV.value.set(tmpV2.x * 0.5 + 0.5, tmpV2.y * 0.5 + 0.5);
+  post.comp.uniforms.rayK.value = facing * facing * (useSun ? sunUp * (0.22 + duskF * 0.3) : moonUp * 0.1);
+  post.comp.uniforms.time.value = performance.now() * 0.001;
+
+  starMat.opacity = Math.max(0, 1 - dayF * 1.6) * 0.9;
+  stars.position.set(p.x, 0, p.z);
+
+  const cb = 0.16 + 0.84 * dayF;
+  cloudMat.color.setRGB(cb, cb, cb).lerp(DUSK_CLOUD, duskF * 0.6);
+  cloudTex.offset.x = (performance.now() * 0.0000045) % 1;
+  clouds.position.set(p.x, 100, p.z);
+}
+
+/* =====================================================================
+ *  メインループ
+ * ===================================================================== */
+spawnPlayer();
+updateChunks();
+processQueue(9); // 足場を先に確保
+spawnPlayer();
+
+const waterOverlay = document.getElementById('water-overlay');
+let lastT = performance.now();
+let lastChunkCheck = 0;
+const baseFog = { near: 30, far: RENDER_DIST * CS };
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > 0.05) dt = 0.05;
+  fpsEma = fpsEma * 0.95 + (1 / Math.max(dt, 1e-4)) * 0.05;
+
+  if (!locked) {   /* シネマ版: メニュー中はゆっくり景色をパンする */
+    cine.yaw += dt * 0.04; player.yaw = cine.yaw;
+    camera.position.set(player.pos.x, player.pos.y + EYE, player.pos.z);
+    camera.rotation.set(cine.pitch, cine.yaw, 0);
+  }
+  const underwater = locked ? updatePlayer(dt) :
+    (getBlock(Math.floor(camera.position.x), Math.floor(camera.position.y), Math.floor(camera.position.z)) === B.WATER);
+
+  /* 長押しで連続破壊・設置（クリエイティブ挙動） */
+  if (locked && (mouseHeld[0] || mouseHeld[2])) {
+    mouseRepeat -= dt;
+    if (mouseRepeat <= 0) {
+      mouseRepeat = 0.25;
+      if (mouseHeld[0]) tryBreak();
+      else if (mouseHeld[2]) tryPlace();
+    }
+  }
+
+  /* 視線先のブロックをハイライト */
+  if (locked) {
+    const hit = raycast(REACH);
+    if (hit) { hlBox.visible = true; hlBox.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5); }
+    else hlBox.visible = false;
+  } else hlBox.visible = false;
+
+  if (now - lastChunkCheck > 400) { lastChunkCheck = now; updateChunks(); }
+  processQueue(2);
+
+  updateSky(dt);
+  updateParticles(dt);
+
+  /* 水中の視界 */
+  if (underwater) {
+    waterOverlay.style.display = 'block';
+    scene.fog.near = 0; scene.fog.far = 22;
+    scene.fog.color.setRGB(0.05, 0.22, 0.55);
+    scene.background = scene.fog.color;
+  } else {
+    waterOverlay.style.display = 'none';
+    scene.fog.near = baseFog.near; scene.fog.far = baseFog.far;
+  }
+  skyDome.visible = !underwater;
+  if (underwater) post.comp.uniforms.rayK.value *= 0.3;
+
+  if (showDebug && now - debugTick > 200) {
+    debugTick = now;
+    const p = player.pos;
+    const dirs = ['南 (+Z)', '西 (-X)', '北 (-Z)', '東 (+X)'];
+    const fi = Math.round(((-player.yaw % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) / (Math.PI / 2)) % 4;
+    debugEl.textContent =
+      `VoxelVista Cinematic seed=${seed}\n` +
+      `FPS: ${fpsEma.toFixed(0)}\n` +
+      `XYZ: ${p.x.toFixed(2)} / ${p.y.toFixed(2)} / ${p.z.toFixed(2)}\n` +
+      `チャンク: ${Math.floor(p.x / CS)}, ${Math.floor(p.z / CS)} (生成済 ${chunks.size})\n` +
+      `向き: ${dirs[fi]}  時刻: ${(timeOfDay * 24).toFixed(1)}時\n` +
+      `モード: ${player.flying ? '飛行' : (player.onGround ? '地上' : '空中')}  編集ブロック: ${editMap.size}`;
+  }
+
+  post.render(scene, camera);
+}
+requestAnimationFrame(frame);
+selectSlot(0);
+itemnameEl.style.opacity = 0;
+</script>
+</body>
+</html>
