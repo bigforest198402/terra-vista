@@ -569,95 +569,263 @@ function caveAt(x, y, z) {
 }
 function treeAt(x, z) { return hash2(x, z, 50) < 0.011; }
 
-/* ---------- はじめから建っている家（スポーン地点のまわりに数軒。普通のブロックなので壊したり改築できる） ----------
+/* ---------- はじめから建っている家（普通のブロックなので壊したり改築できる） ----------
+   スポーン地点のまわりに大きな家 + 小さな家 3 軒の集落、それ以外にもワールドのあちこちに 1 軒ずつ点在する。
    局所座標 (u,v): u=間口方向, v=奥行き方向, v=0 が玄関側の壁（外は v<0）。rot で 90 度ずつ回す */
 const HOUSE_TYPES = [
   { W: 9, D: 7, wall: B.PLANKS, corner: B.COBBLE, roof: B.BRICK },   // 板張りに石の柱、れんが屋根
   { W: 7, D: 6, wall: B.BRICK,  corner: B.COBBLE, roof: B.PLANKS },  // れんが造り、板屋根
   { W: 7, D: 7, wall: B.COBBLE, corner: B.PLANKS, roof: B.BRICK },   // 石造りの小屋
 ];
-let _houses = null;
-function getHouses() { if (!_houses) _houses = planHouses(); return _houses; }
-function planHouses() {
-  const SX = 8, SZ = 8, out = [];
-  const toW = (r, x0, z0, u, v) => r === 0 ? [x0 + u, z0 + v] : r === 1 ? [x0 - v, z0 + u] : r === 2 ? [x0 - u, z0 - v] : [x0 + v, z0 - u];
-  const FACE = [[0, -1], [1, 0], [0, 1], [-1, 0]];               // 玄関の向き
+/* 間取りのある大きな家: 左手前=リビング, 左奥=キッチンとダイニング, 右手前=子ども部屋, 右奥=寝室 */
+const BIG_HOUSE = { W: 15, D: 11, H: 4, wall: B.PLANKS, corner: B.COBBLE, roof: B.BRICK, door: 4, rooms: true };
+const HREG = 72;                         // 点在する家の区画の大きさ（1 区画に最大 1 軒）
+const SPAWN_X = 8, SPAWN_Z = 8;
+
+function houseToW(r, x0, z0, u, v) { return r === 0 ? [x0 + u, z0 + v] : r === 1 ? [x0 - v, z0 + u] : r === 2 ? [x0 - u, z0 - v] : [x0 + v, z0 - u]; }
+/* 連続座標版（家具用）: セル (u,v) が [u,u+1]x[v,v+1] を占めるように回す */
+function houseToWc(r, x0, z0, U, V) { return r === 0 ? [x0 + U, z0 + V] : r === 1 ? [x0 + 1 - V, z0 + U] : r === 2 ? [x0 + 1 - U, z0 + 1 - V] : [x0 + V, z0 + 1 - U]; }
+
+/* 敷地の判定: ひさし・階段まで含めて平らで、水辺でも山の上でもないこと */
+function houseSite(T, r, x0, z0) {
+  let hmin = 99, hmax = -99, x1 = 1e9, x2 = -1e9, z1 = 1e9, z2 = -1e9;
+  for (let u = -1; u <= T.W; u++) for (let v = -4; v <= T.D; v++) {
+    const p = houseToW(r, x0, z0, u, v), h = heightAt(p[0], p[1]);
+    if (v >= -1) { hmin = Math.min(hmin, h); hmax = Math.max(hmax, h); }
+    x1 = Math.min(x1, p[0]); x2 = Math.max(x2, p[0]); z1 = Math.min(z1, p[1]); z2 = Math.max(z2, p[1]);
+  }
+  if (hmax - hmin > 2 || hmin <= SEA + 1 || hmax >= 44) return null;
+  return { F: hmax + 1, x1, x2, z1, z2 };
+}
+
+let _village = null;
+function getVillage() {
+  if (_village) return _village;
+  const out = [], FACE = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+  const todo = [BIG_HOUSE, ...HOUSE_TYPES];
   let ti = 0;
-  for (let ring = 0; ring < 9 && ti < HOUSE_TYPES.length; ring++) {
+  for (let ring = 0; ring < 10 && ti < todo.length; ring++) {
     const rad = 14 + ring * 5, nA = 10 + ring * 3, a0 = hash2(ring, 3, 401) * 6.2832;
-    for (let ai = 0; ai < nA && ti < HOUSE_TYPES.length; ai++) {
-      const T = HOUSE_TYPES[ti], a = a0 + ai / nA * 6.2832;
-      const x0 = Math.round(SX + Math.cos(a) * rad), z0 = Math.round(SZ + Math.sin(a) * rad);
-      /* 玄関をスポーン地点に向ける */
-      let best = 0, bd = -2;
-      for (let r = 0; r < 4; r++) {
-        const c = toW(r, x0, z0, T.W / 2, T.D / 2), dx = SX - c[0], dz = SZ - c[1], l = Math.hypot(dx, dz) || 1;
-        const d = (FACE[r][0] * dx + FACE[r][1] * dz) / l;
-        if (d > bd) { bd = d; best = r; }
+    for (let ai = 0; ai < nA && ti < todo.length; ai++) {
+      const T = todo[ti], a = a0 + ai / nA * 6.2832;
+      const x0 = Math.round(SPAWN_X + Math.cos(a) * rad), z0 = Math.round(SPAWN_Z + Math.sin(a) * rad);
+      let r = 0, bd = -2;                                       // 玄関をスポーン地点に向ける
+      for (let k = 0; k < 4; k++) {
+        const c = houseToW(k, x0, z0, T.W / 2, T.D / 2), dx = SPAWN_X - c[0], dz = SPAWN_Z - c[1], l = Math.hypot(dx, dz) || 1;
+        const d = (FACE[k][0] * dx + FACE[k][1] * dz) / l;
+        if (d > bd) { bd = d; r = k; }
       }
-      const r = best;
-      /* 敷地: ひさし・階段まで含めて平らで、水辺でも山頂でもないこと */
-      let hmin = 99, hmax = -99, x1 = 1e9, x2 = -1e9, z1 = 1e9, z2 = -1e9;
-      for (let u = -1; u <= T.W; u++) for (let v = -4; v <= T.D; v++) {
-        const p = toW(r, x0, z0, u, v), h = heightAt(p[0], p[1]);
-        if (v >= -1) { hmin = Math.min(hmin, h); hmax = Math.max(hmax, h); }
-        x1 = Math.min(x1, p[0]); x2 = Math.max(x2, p[0]); z1 = Math.min(z1, p[1]); z2 = Math.max(z2, p[1]);
-      }
-      if (hmax - hmin > 2 || hmin <= SEA + 1 || hmax >= 44) continue;
-      if (SX >= x1 - 3 && SX <= x2 + 3 && SZ >= z1 - 3 && SZ <= z2 + 3) continue;
-      if (out.some((o) => x1 < o.x2 + 5 && x2 > o.x1 - 5 && z1 < o.z2 + 5 && z2 > o.z1 - 5)) continue;
-      out.push(buildHouse(T, r, x0, z0, hmax + 1, toW, x1, x2, z1, z2));
+      const s = houseSite(T, r, x0, z0);
+      if (!s) continue;
+      if (SPAWN_X >= s.x1 - 3 && SPAWN_X <= s.x2 + 3 && SPAWN_Z >= s.z1 - 3 && SPAWN_Z <= s.z2 + 3) continue;
+      if (out.some((o) => s.x1 < o.x2 + 5 && s.x2 > o.x1 - 5 && s.z1 < o.z2 + 5 && s.z2 > o.z1 - 5)) continue;
+      out.push(buildHouse(T, r, x0, z0, s));
       ti++;
     }
   }
+  return (_village = out);
+}
+const _regionHouses = new Map();
+function regionHouses(rx, rz) {
+  const key = rx + ',' + rz;
+  let list = _regionHouses.get(key);
+  if (list) return list;
+  list = [];
+  const cxr = rx * HREG + HREG / 2, czr = rz * HREG + HREG / 2;
+  if (Math.hypot(cxr - SPAWN_X, czr - SPAWN_Z) > 95 && hash2(rx, rz, 410) < 0.62) {
+    const pick = hash2(rx, rz, 411);
+    const T = pick < 0.22 ? BIG_HOUSE : HOUSE_TYPES[Math.min(2, Math.floor((pick - 0.22) / 0.78 * 3))];
+    for (let t = 0; t < 8; t++) {
+      const x0 = rx * HREG + 18 + Math.floor(hash3(rx, t, rz, 412) * (HREG - 40));
+      const z0 = rz * HREG + 18 + Math.floor(hash3(rx, t, rz, 413) * (HREG - 40));
+      const r = Math.floor(hash3(rx, t, rz, 414) * 4);
+      const s = houseSite(T, r, x0, z0);
+      if (s) { list.push(buildHouse(T, r, x0, z0, s)); break; }
+    }
+  }
+  _regionHouses.set(key, list);
+  return list;
+}
+/* 範囲 [x1,x2]x[z1,z2] に掛かる家の一覧 */
+function housesInBox(x1, z1, x2, z2) {
+  const out = [];
+  for (const o of getVillage()) if (o.x2 >= x1 && o.x1 <= x2 && o.z2 >= z1 && o.z1 <= z2) out.push(o);
+  for (let rx = Math.floor((x1 - 24) / HREG); rx <= Math.floor((x2 + 24) / HREG); rx++)
+    for (let rz = Math.floor((z1 - 24) / HREG); rz <= Math.floor((z2 + 24) / HREG); rz++)
+      for (const o of regionHouses(rx, rz)) if (o.x2 >= x1 && o.x1 <= x2 && o.z2 >= z1 && o.z1 <= z2) out.push(o);
   return out;
 }
-function buildHouse(T, r, x0, z0, F, toW, x1, x2, z1, z2) {
-  const list = [];
-  const put = (u, v, y, id) => { const p = toW(r, x0, z0, u, v); list.push(p[0], y, p[1], id); };
-  const W = T.W, D = T.D, mid = Math.floor(W / 2), roofTop = F + 4 + Math.ceil(D / 2);
+
+function buildHouse(T, r, x0, z0, s) {
+  const list = [], F = s.F;
+  const put = (u, v, y, id) => { const p = houseToW(r, x0, z0, u, v); list.push(p[0], y, p[1], id); };
+  const W = T.W, D = T.D, HH = T.H || 3, door = T.door != null ? T.door : Math.floor(W / 2);
+  const roofY = F + HH + 1, roofTop = roofY + Math.ceil(D / 2);
   /* 1) 敷地の上を空ける */
   for (let u = -1; u <= W; u++) for (let v = -1; v <= D; v++) for (let y = F + 1; y <= roofTop + 3; y++) put(u, v, y, B.AIR);
   /* 2) 石の基礎（地面の少し下から床まで）と板の床 */
   for (let u = 0; u < W; u++) for (let v = 0; v < D; v++) {
-    const p = toW(r, x0, z0, u, v), h = heightAt(p[0], p[1]);
+    const p = houseToW(r, x0, z0, u, v), h = heightAt(p[0], p[1]);
     for (let y = h - 1; y <= F; y++) put(u, v, y, B.COBBLE);
     if (u > 0 && u < W - 1 && v > 0 && v < D - 1) put(u, v, F, B.PLANKS);
   }
   /* 3) 玄関前の石段 */
-  for (let s = 1; s <= 3; s++) for (let du = -1; du <= 1; du++) {
-    const p = toW(r, x0, z0, mid + du, -s), h = heightAt(p[0], p[1]), top = F - s;   // 1 段ずつ下がる
+  for (let st = 1; st <= 3; st++) for (let du = -1; du <= 1; du++) {
+    const p = houseToW(r, x0, z0, door + du, -st), h = heightAt(p[0], p[1]), top = F - st;   // 1 段ずつ下がる
     if (top < h) continue;
-    for (let y = h - 1; y <= top; y++) put(mid + du, -s, y, B.COBBLE);
+    for (let y = h - 1; y <= top; y++) put(door + du, -st, y, B.COBBLE);
   }
-  /* 4) 壁（角は柱）・窓・入口 */
+  /* 4) 外壁（角は柱）・窓・入口 */
+  const midV = Math.floor(D / 2);
   for (let u = 0; u < W; u++) for (let v = 0; v < D; v++) {
     const edgeU = u === 0 || u === W - 1, edgeV = v === 0 || v === D - 1;
     if (!edgeU && !edgeV) continue;
-    for (let y = F + 1; y <= F + 3; y++) {
-      let id = (edgeU && edgeV) ? T.corner : T.wall;
-      const win = y === F + 2 && !(edgeU && edgeV) &&
-        ((edgeV && (u === 2 || u === W - 3 || (v === D - 1 && u === mid))) || (edgeU && v === Math.floor(D / 2)));
+    for (let y = F + 1; y <= F + HH; y++) {
+      let id = (edgeU && edgeV) ? T.corner : T.wall, win;
+      if (T.rooms) win = (y === F + 2 || y === F + 3) && !(edgeU && edgeV) && !(edgeV && u === 8) &&
+                         ((edgeV && u % 3 === 2 && !(v === D - 1 && u < 8)) ||   // キッチンの吊り戸棚の裏は窓にしない
+                          (edgeU && (v === 2 || v === 3)));                     // 横の窓はリビングと子ども部屋だけ
+      else win = y === F + 2 && !(edgeU && edgeV) &&
+                 ((edgeV && (u === 2 || u === W - 3 || (v === D - 1 && u === door))) || (edgeU && v === midV));
       if (win) id = B.GLASS;
-      if (v === 0 && u === mid && y <= F + 2) id = B.AIR;          // 入口
+      if (v === 0 && u === door && y <= F + 2) id = B.AIR;          // 入口
       put(u, v, y, id);
     }
-    put(u, v, F + 4, T.corner === B.COBBLE ? B.PLANKS : T.wall);   // 壁の上の梁
+    put(u, v, F + HH + 1, T.corner === B.COBBLE ? B.PLANKS : T.wall);   // 壁の上の梁
   }
-  /* 5) 切妻屋根（ひさし付き）と妻壁 */
+  /* 5) 間仕切り（大きな家）: u=8 の壁で左右に分け、右側は v=5 の壁で手前と奥に分ける */
+  if (T.rooms) {
+    for (let v = 1; v < D - 1; v++) for (let y = F + 1; y <= F + HH; y++)
+      put(8, v, y, (v === 3 || v === 7) && y <= F + 2 ? B.AIR : B.PLANKS);
+    for (let u = 9; u < W - 1; u++) for (let y = F + 1; y <= F + HH; y++) put(u, 5, y, B.PLANKS);
+  }
+  /* 6) 切妻屋根（ひさし付き）と妻壁 */
   for (let k = 0; ; k++) {
-    const va = -1 + k, vb = D - k, y = F + 4 + k;
+    const va = -1 + k, vb = D - k, y = roofY + k;
     if (va > vb) break;
     for (let u = -1; u <= W; u++) { put(u, va, y, T.roof); if (vb !== va) put(u, vb, y, T.roof); }
-    if (k > 0) for (let v = va + 1; v < vb; v++) { put(0, v, y, T.wall === B.BRICK ? B.BRICK : B.PLANKS); put(W - 1, v, y, T.wall === B.BRICK ? B.BRICK : B.PLANKS); }
+    const gw = T.wall === B.BRICK ? B.BRICK : B.PLANKS;
+    if (k > 0) for (let v = va + 1; v < vb; v++) { put(0, v, y, gw); put(W - 1, v, y, gw); }
   }
-  /* 6) 煙突 */
-  for (let y = F + 4; y <= roofTop + 1; y++) put(W - 3, D - 2, y, B.COBBLE);
-  return { x1: x1 - 1, x2: x2 + 1, z1: z1 - 1, z2: z2 + 1, blocks: new Int32Array(list) };
+  /* 7) 煙突 */
+  const chU = T.rooms ? 3 : W - 3;
+  for (let y = roofY; y <= roofTop + 1; y++) put(chU, D - 2, y, B.COBBLE);
+  return { x1: s.x1 - 1, x2: s.x2 + 1, z1: s.z1 - 1, z2: s.z2 + 1, blocks: new Int32Array(list), r, x0, z0, F, big: !!T.rooms,
+           props: T.rooms ? houseProps(r, x0, z0, F) : [] };
 }
-function nearHouse(x, z, m) {
-  for (const o of getHouses()) if (x >= o.x1 - m && x <= o.x2 + m && z >= o.z1 - m && z <= o.z2 + m) return true;
-  return false;
+
+/* ---------- 家具（ブロックではない飾り。床が残っている間だけ表示する） ----------
+   各部品は局所座標の箱 [U0,U1]x[V0,V1]、高さは床の上面からの y0..y1。m = 素材 */
+const PROP_MAT = {
+  wood:   { wood: true, c: [1.0, 1.0, 1.0] },
+  dark:   { wood: true, c: [0.5, 0.42, 0.38] },
+  white:  { c: [0.86, 0.85, 0.82] }, cream: { c: [0.92, 0.86, 0.72] },
+  stone:  { c: [0.42, 0.42, 0.44] }, metal: { c: [0.62, 0.64, 0.66] }, black: { c: [0.05, 0.05, 0.06] },
+  blue:   { c: [0.18, 0.32, 0.62] }, pink:  { c: [0.88, 0.5, 0.6] },  green: { c: [0.3, 0.46, 0.34] },
+  beige:  { c: [0.74, 0.64, 0.5] },  red:   { c: [0.72, 0.2, 0.16] }, yellow: { c: [0.9, 0.74, 0.26] },
+  screen: { c: [0.08, 0.12, 0.18] }, rugred: { c: [0.56, 0.2, 0.18] },
+};
+function houseProps(r, x0, z0, F) {
+  const out = [];
+  const box = (U0, V0, y0, U1, V1, y1, m) => {
+    const a = houseToWc(r, x0, z0, U0, V0), b = houseToWc(r, x0, z0, U1, V1);
+    const cu = Math.floor((U0 + U1) / 2), cv = Math.floor((V0 + V1) / 2), an = houseToW(r, x0, z0, cu, cv);
+    out.push({ x0: Math.min(a[0], b[0]), x1: Math.max(a[0], b[0]), z0: Math.min(a[1], b[1]), z1: Math.max(a[1], b[1]),
+               y0: F + 1 + y0, y1: F + 1 + y1, m: PROP_MAT[m], ax: an[0], az: an[1], ay: F });
+  };
+  const legs = (U0, V0, U1, V1, h, t, m) => {
+    box(U0, V0, 0, U0 + t, V0 + t, h, m); box(U1 - t, V0, 0, U1, V0 + t, h, m);
+    box(U0, V1 - t, 0, U0 + t, V1, h, m); box(U1 - t, V1 - t, 0, U1, V1, h, m);
+  };
+  const table = (U0, V0, U1, V1, h, m) => { box(U0, V0, h - 0.05, U1, V1, h, m); legs(U0 + 0.05, V0 + 0.05, U1 - 0.05, V1 - 0.05, h - 0.05, 0.07, m); };
+  const chair = (U, V, face, m) => {    // face: 背もたれの向き 0=-V 1=+U 2=+V 3=-U
+    box(U - 0.22, V - 0.22, 0.42, U + 0.22, V + 0.22, 0.47, m); legs(U - 0.2, V - 0.2, U + 0.2, V + 0.2, 0.42, 0.05, m);
+    const bk = [[U - 0.22, V - 0.22, U + 0.22, V - 0.17], [U + 0.17, V - 0.22, U + 0.22, V + 0.22],
+                [U - 0.22, V + 0.17, U + 0.22, V + 0.22], [U - 0.22, V - 0.22, U - 0.17, V + 0.22]][face];
+    box(bk[0], bk[1], 0.47, bk[2], bk[3], 0.95, m);
+  };
+
+  /* --- リビング（U 1..8, V 1..5） --- */
+  box(2.1, 1.7, 0, 5.4, 4.3, 0.015, 'beige');                                       // ラグ
+  box(1.02, 1.7, 0, 1.92, 4.3, 0.42, 'blue');                                       // ソファ: 座面
+  box(1.02, 1.7, 0.42, 1.27, 4.3, 0.95, 'blue');                                    //        背もたれ
+  box(1.02, 1.7, 0.42, 1.92, 1.95, 0.62, 'blue'); box(1.02, 4.05, 0.42, 1.92, 4.3, 0.62, 'blue');   // ひじ掛け
+  box(1.3, 2.05, 0.42, 1.45, 2.6, 0.75, 'cream'); box(1.3, 3.4, 0.42, 1.45, 3.95, 0.75, 'cream');  // クッション
+  table(2.7, 2.4, 3.7, 3.6, 0.42, 'wood');                                         // ローテーブル
+  box(5.15, 2.0, 0, 5.6, 4.0, 0.5, 'dark');                                         // テレビ台
+  box(5.32, 2.1, 0.5, 5.42, 3.9, 1.28, 'black'); box(5.3, 2.15, 0.55, 5.32, 3.85, 1.23, 'screen');  // テレビ
+  box(6.2, 1.03, 0, 7.95, 1.42, 2.1, 'wood');                                       // 本棚
+  const bookC = ['red', 'blue', 'green', 'yellow', 'cream', 'pink'];
+  for (let sh = 0; sh < 4; sh++) {
+    box(6.25, 1.42, 0.08 + sh * 0.5, 7.9, 1.44, 0.12 + sh * 0.5, 'dark');          // 棚板の縁
+    for (let bi = 0; bi < 7; bi++) {
+      const u = 6.3 + bi * 0.225, hb = 0.3 + 0.12 * hash3(bi, sh, x0 + z0, 430);
+      box(u, 1.2, 0.12 + sh * 0.5, u + 0.18, 1.43, 0.12 + sh * 0.5 + hb, bookC[(bi + sh * 2) % 6]);
+    }
+  }
+  box(1.25, 4.55, 0, 1.55, 4.85, 0.04, 'black'); box(1.37, 4.67, 0.04, 1.43, 4.73, 1.45, 'black');  // フロアランプ
+  box(1.18, 4.48, 1.4, 1.62, 4.92, 1.72, 'cream');
+  /* --- キッチンとダイニング（U 1..8, V 6..10） --- */
+  box(1.02, 9.35, 0, 6.0, 9.98, 0.88, 'white');                                     // 流し台の下の戸棚
+  box(1.0, 9.3, 0.88, 6.02, 9.98, 0.94, 'stone');                                   // 天板
+  box(2.5, 9.45, 0.9, 3.3, 9.85, 0.945, 'metal');                                   // シンク
+  box(2.85, 9.85, 0.94, 2.95, 9.92, 1.2, 'metal');                                  // 蛇口
+  box(4.3, 9.4, 0.94, 5.2, 9.95, 0.96, 'black');                                    // コンロ
+  for (const [bu, bv] of [[4.5, 9.55], [4.95, 9.55], [4.5, 9.8], [4.95, 9.8]]) box(bu - 0.09, bv - 0.09, 0.96, bu + 0.09, bv + 0.09, 0.975, 'metal');
+  box(1.02, 9.62, 1.5, 6.0, 9.98, 2.25, 'wood');                                    // 吊り戸棚
+  box(6.2, 9.2, 0, 7.0, 9.98, 1.95, 'white');                                       // 冷蔵庫
+  box(6.21, 9.18, 1.2, 7.0, 9.2, 1.22, 'metal'); box(6.85, 9.15, 0.6, 6.9, 9.18, 1.1, 'metal');
+  box(2.4, 6.4, 0, 5.6, 8.6, 0.015, 'rugred');                                      // ダイニングのラグ
+  table(2.9, 6.9, 5.1, 8.1, 0.76, 'wood');                                          // ダイニングテーブル
+  chair(3.5, 6.55, 0, 'wood'); chair(4.5, 6.55, 0, 'wood'); chair(3.5, 8.45, 2, 'wood'); chair(4.5, 8.45, 2, 'wood');
+  box(3.8, 7.3, 0.76, 4.2, 7.7, 0.79, 'white'); box(3.92, 7.42, 0.79, 4.08, 7.58, 0.95, 'green');   // 花瓶
+  /* --- 寝室（U 9..14, V 6..10） --- */
+  box(9.7, 6.3, 0, 12.8, 7.6, 0.015, 'pink');                                       // ラグ
+  box(9.2, 7.8, 0, 11.3, 9.98, 0.32, 'wood');                                       // ベッド: 枠
+  box(9.25, 7.85, 0.32, 11.25, 9.9, 0.52, 'white');                                 //        マットレス
+  box(9.22, 7.82, 0.52, 11.28, 9.15, 0.6, 'blue');                                  //        掛け布団
+  box(9.5, 9.3, 0.52, 10.15, 9.8, 0.66, 'white'); box(10.35, 9.3, 0.52, 11.0, 9.8, 0.66, 'white');  // まくら
+  box(9.2, 9.86, 0, 11.3, 9.98, 1.05, 'dark');                                      // ヘッドボード
+  box(11.45, 9.4, 0, 11.95, 9.95, 0.5, 'wood');                                     // ナイトテーブル
+  box(11.6, 9.55, 0.5, 11.8, 9.75, 0.62, 'cream'); box(11.55, 9.5, 0.62, 11.85, 9.8, 0.85, 'yellow');
+  box(13.25, 6.1, 0, 13.98, 7.9, 2.05, 'dark');                                     // 洋服だんす
+  box(13.22, 6.98, 0.1, 13.25, 7.02, 1.95, 'black'); box(13.2, 6.8, 0.95, 13.23, 6.88, 1.15, 'metal'); box(13.2, 7.12, 0.95, 13.23, 7.2, 1.15, 'metal');
+  /* --- 子ども部屋（U 9..14, V 1..5） --- */
+  box(12.2, 1.05, 0, 13.98, 2.3, 0.28, 'wood');                                     // 子ども用ベッド
+  box(12.25, 1.1, 0.28, 13.93, 2.25, 0.45, 'white');
+  box(12.22, 1.07, 0.45, 13.4, 2.28, 0.52, 'pink');
+  box(13.45, 1.3, 0.45, 13.85, 2.05, 0.57, 'white');
+  box(13.86, 1.05, 0, 13.98, 2.3, 0.8, 'wood');
+  table(9.2, 1.05, 10.7, 1.75, 0.7, 'wood');                                        // 勉強机
+  chair(9.95, 2.2, 2, 'red');
+  box(10.95, 4.1, 0, 11.75, 4.85, 0.45, 'red'); box(10.93, 4.08, 0.45, 11.77, 4.87, 0.5, 'yellow');  // おもちゃ箱
+  box(9.5, 2.9, 0, 12.0, 4.4, 0.015, 'green');                                      // ラグ
+  box(12.4, 3.3, 0, 12.75, 3.65, 0.35, 'blue'); box(12.45, 3.35, 0.35, 12.7, 3.6, 0.6, 'yellow');   // 積み木
+  return out;
+}
+/* 家具の箱をチャンクの建材メッシュに追加する */
+function addProp(O, p) {
+  const PL_U0 = (TI.PLANKS * TILE + GUT) / AW, PL_U1 = (TI.PLANKS * TILE + TILE - GUT) / AW;
+  const FLAT_U = (6 * TILE + TILE / 2) / AW, VA = GUT / TILE, VB = 1 - GUT / TILE;
+  const K = p.m.wood ? 1 : 1 / 0.2158;     // 無地の部分は灰色のタイル（sRGB 0x80）に色を掛けて出す
+  const cr = p.m.c[0] * K, cg = p.m.c[1] * K, cb = p.m.c[2] * K;
+  const X = [p.x0, p.x1], Y = [p.y0, p.y1], Z = [p.z0, p.z1];
+  const dims = [p.x1 - p.x0, p.y1 - p.y0, p.z1 - p.z0];
+  for (let f = 0; f < 6; f++) {
+    const ax = f >> 1, sg = f & 1, a1 = (ax + 1) % 3, a2 = (ax + 2) % 3;
+    const vi = O.pos.length / 3, n = [0, 0, 0]; n[ax] = sg ? 1 : -1;
+    const sh = ax === 1 ? (sg ? 1.0 : 0.55) : 0.86;
+    for (let q = 0; q < 4; q++) {
+      const s = (q === 1 || q === 2) ? 1 : 0, t = q >= 2 ? 1 : 0, c = [0, 0, 0];
+      c[ax] = sg; c[a1] = s; c[a2] = t;
+      O.pos.push(X[c[0]], Y[c[1]], Z[c[2]]);
+      O.nor.push(n[0], n[1], n[2]);
+      if (p.m.wood) O.uv.push(PL_U0 + (PL_U1 - PL_U0) * s * Math.min(1, dims[a1]), VA + (VB - VA) * t * Math.min(1, dims[a2]));
+      else O.uv.push(FLAT_U, 0.5);
+      O.col.push(cr * sh, cg * sh, cb * sh);
+    }
+    if (sg) O.idx.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3); else O.idx.push(vi, vi + 2, vi + 1, vi, vi + 3, vi + 2);
+  }
 }
 
 function genChunk(cx, cz) {
@@ -665,6 +833,8 @@ function genChunk(cx, cz) {
   const bx0 = cx * CS, bz0 = cz * CS;
   const set = (lx, y, lz, id) => { data[(lx * H + y) * CS + lz] = id; };
   const get = (lx, y, lz) => data[(lx * H + y) * CS + lz];
+  const hs = housesInBox(bx0 - 6, bz0 - 6, bx0 + CS + 6, bz0 + CS + 6);
+  const nearHouse = (x, z, m) => hs.some((o) => x >= o.x1 - m && x <= o.x2 + m && z >= o.z1 - m && z <= o.z2 + m);
 
   for (let lx = 0; lx < CS; lx++) for (let lz = 0; lz < CS; lz++) {
     const wx = bx0 + lx, wz = bz0 + lz;
@@ -711,7 +881,7 @@ function genChunk(cx, cz) {
   }
 
   /* 家 */
-  for (const o of getHouses()) {
+  for (const o of hs) {
     if (o.x2 < bx0 || o.x1 >= bx0 + CS || o.z2 < bz0 || o.z1 >= bz0 + CS) continue;
     const L = o.blocks;
     for (let i = 0; i < L.length; i += 4) {
@@ -1257,6 +1427,14 @@ function buildChunkGeometry(c) {
       if (aos[0] + aos[2] < aos[1] + aos[3]) tgt.idx.push(vi + 1, vi + 2, vi + 3, vi + 1, vi + 3, vi + 0);
       else tgt.idx.push(vi + 0, vi + 1, vi + 2, vi + 0, vi + 2, vi + 3);
     }
+  }
+
+  /* 3b) 家具（床が残っていて、置き場所が空いているときだけ） */
+  for (const o of housesInBox(bx0, bz0, bx0 + CS - 1, bz0 + CS - 1)) for (const p of o.props) {
+    const lx = p.ax - bx0, lz = p.az - bz0;
+    if (lx < 0 || lx >= CS || lz < 0 || lz >= CS) continue;
+    if (OCC[blk(lx, p.ay, lz)] !== 1 || blk(lx, p.ay + 1, lz) !== B.AIR) continue;
+    addProp(O, p);
   }
 
   /* 4) 水面: 海のセル + 岸の 1 セル分（滑らかな地形との交線が波打ち際になる） */
